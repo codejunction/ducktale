@@ -419,7 +419,10 @@ async function loadCatalog() {
   let rows;
   try { rows = await api('/api/catalog'); }
   catch (err) { catalogDone(); $('catalog').replaceChildren(el('div', err.message, 'err')); return; }
-  if (rows.building) { catalogTimer = setTimeout(loadCatalog, 1500); return; }
+  if (rows.building) {
+    if (rows.progress) $('catalog').replaceChildren(spinner(rows.progress.replace(/^\w/, c => c.toUpperCase()) + '…'));
+    catalogTimer = setTimeout(loadCatalog, 1500); return;
+  }
   catalogDone();
   loadSources();  // health dots reflect the sources just attached
   const tables = {};

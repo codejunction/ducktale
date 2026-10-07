@@ -4,11 +4,13 @@ import hashlib
 import hmac
 import io
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
@@ -130,6 +132,18 @@ def sqlserver(n, c):  # credentials go through a secret: a DSN in ATTACH would s
 
 
 MONGO_SCHEMA_SAMPLE = 10_000  # random documents per collection; covers small collections completely
+MONGO_ANALYSIS_TIMEOUT_S = 30  # per collection; slower -> the extension's own 100-document inference
+# Without these a host that never answers (wrong port, TLS expected, unreachable replica-set members) hangs forever.
+MONGO_DEFAULT_OPTIONS = {"connectTimeoutMS": "10000", "serverSelectionTimeoutMS": "15000"}
+log = logging.getLogger("uvicorn.error")
+CATALOG_STATE = threading.local()  # .key of the catalog job running on this thread, for progress()
+
+
+def progress(msg):
+    """Report cataloging progress: server log + the catalog spinner (via /api/catalog)."""
+    log.info("catalog: %s", msg)
+    if key := getattr(CATALOG_STATE, "key", None):
+        PROGRESS[key] = msg
 
 
 def mongo(db, n, c, test=False):
@@ -150,7 +164,9 @@ def mongo(db, n, c, test=False):
     # BuildMongoConnectionString appends "authSource=" + AUTHSOURCE verbatim, so those ride along after it
     # ($external + PLAIN for LDAP etc.). ponytail: relies on that concatenation; use an OPTIONS field if one appears.
     mapped = {"authsource", "tls", "ssl", "tlscafile", "tlsallowinvalidcertificates"}
-    rest = urlencode([(k, x) for k, v in query.items() if k.lower() not in mapped for x in v], safe="$")
+    pairs = [(k, x) for k, v in query.items() if k.lower() not in mapped for x in v]
+    pairs += [(k, v) for k, v in MONGO_DEFAULT_OPTIONS.items() if k.lower() not in opts]
+    rest = urlencode(pairs, safe="$")
     params = {"TYPE": "mongo", "HOST": u.hostname, "PORT": u.port or 27017, "SRV": u.scheme == "mongodb+srv",
               "USER": unquote(u.username or ""), "PASSWORD": unquote(u.password or ""),
               "AUTHSOURCE": auth_source + (f"&{rest}" if rest else ""),
@@ -161,27 +177,39 @@ def mongo(db, n, c, test=False):
               secret(n, {k: v for k, v in params.items() if v not in ("", None)})):
         db.execute(s)
     probe = ident(n + "__discover")  # attached only to list databases/collections, then detached
+    progress(f"{n}: connecting and listing collections")
     db.execute(f"ATTACH '' AS {probe} (TYPE mongo, SECRET {ident(n)}, READ_ONLY)")
-    colls = db.execute("SELECT DISTINCT schema_name, table_name FROM duckdb_columns() WHERE database_name = ?",
-                       [n + "__discover"]).fetchall()
+    colls = db.execute("SELECT table_schema, table_name FROM information_schema.tables WHERE table_catalog = ?"
+                       " ORDER BY ALL", [n + "__discover"]).fetchall()
     db.execute(f"DETACH {probe}")
     if test:  # listing collections already proved host, credentials and auth mechanism
         return []
     db.execute(f"ATTACH ':memory:' AS {ident(n)}")
-    for dbname, coll in colls:
+    for i, (dbname, coll) in enumerate(colls, 1):
+        progress(f"{n}: analysing {dbname}.{coll} ({i}/{len(colls)})")
+        t0 = time.monotonic()
         db.execute(f"CREATE SCHEMA IF NOT EXISTS {ident(n)}.{ident(dbname)}")
         has_schema_doc = db.execute(f"SELECT count(*) FROM mongo_scan({lit(n)}, ?, ?, filter = ?, columns = {{'_id': 'VARCHAR'}})",
                                     [dbname, coll, '{"_id": "__schema"}']).fetchone()[0]
         columns = ""
         if not has_schema_doc:  # without columns the extension reads the __schema document itself
             pipeline = json.dumps([{"$sample": {"size": MONGO_SCHEMA_SAMPLE}}, {"$project": {"_id": 0, "doc": "$$ROOT"}}])
-            docs = db.execute(f"SELECT doc FROM mongo_scan({lit(n)}, ?, ?, pipeline = ?, columns = {{'doc': 'VARCHAR'}})",
-                              [dbname, coll, pipeline]).fetchall()
-            schema = merge_types([infer_type(json.loads(d)) for (d,) in docs if d]) or {"_id": "VARCHAR"}
-            columns = ", columns = {" + ", ".join(f"{lit(k)}: {lit(render_type(t))}" for k, t in schema.items()) + "}"
+            timer = threading.Timer(MONGO_ANALYSIS_TIMEOUT_S, db.interrupt)
+            timer.start()
+            try:
+                docs = db.execute(f"SELECT doc FROM mongo_scan({lit(n)}, ?, ?, pipeline = ?, columns = {{'doc': 'VARCHAR'}})",
+                                  [dbname, coll, pipeline]).fetchall()
+                schema = merge_types([infer_type(json.loads(d)) for (d,) in docs if d]) or {"_id": "VARCHAR"}
+                columns = ", columns = {" + ", ".join(f"{lit(k)}: {lit(render_type(t))}" for k, t in schema.items()) + "}"
+            except duckdb.InterruptException:
+                log.warning("catalog: %s.%s.%s analysis took over %ss; using the extension's own inference",
+                            n, dbname, coll, MONGO_ANALYSIS_TIMEOUT_S)
+            finally:
+                timer.cancel()
         hide = " WHERE _id IS DISTINCT FROM '__schema'" if has_schema_doc else ""  # the extension returns it as a row
         db.execute(f"CREATE VIEW {ident(n)}.{ident(dbname)}.{ident(coll)} AS "
                    f"SELECT * FROM mongo_scan({lit(n)}, {lit(dbname)}, {lit(coll)}{columns}){hide}")
+        log.info("catalog: %s.%s.%s done in %.1fs", n, dbname, coll, time.monotonic() - t0)
     return []
 
 
@@ -273,7 +301,7 @@ ENGINES, CATALOG, HEALTH = {}, {}, {}
 BUILD_LOCK = threading.Lock()
 # Cataloging (attaching every source, analysing Mongo collections) runs in a background thread per access set;
 # /api/catalog answers 202 until it is done. GEN guards against storing a catalog that a later change invalidated.
-JOBS, CATALOG_ERRORS, GEN = {}, {}, [0]
+JOBS, CATALOG_ERRORS, PROGRESS, GEN = {}, {}, {}, [0]
 JOBS_LOCK = threading.Lock()
 RUNNING = {}
 FILE_WRITES = {duckdb.StatementType.COPY, duckdb.StatementType.COPY_DATABASE, duckdb.StatementType.EXPORT}
@@ -286,9 +314,11 @@ BLOCKED_FUNCTIONS = re.compile(r"\b(mongo_\w+|postgres_\w+|mssql_\w+|mysql_\w+|s
 
 def build(sources, strict=False, test=False):
     db = duckdb.connect(config={"memory_limit": MEMORY_LIMIT})
+    db.execute("SET enable_progress_bar = false")  # remote scans can't report progress: it only ever printed 0%
     allowed = []
     for name, typ, config in sources:
         try:
+            progress(f"{name}: connecting")
             allowed += CONNECTORS[typ](db, name, config, test)
             HEALTH[name] = None
         except (duckdb.Error, KeyError, ValueError) as e:
@@ -336,8 +366,11 @@ def invalidate():
 
 def catalog_job(key):
     gen = GEN[0]
+    CATALOG_STATE.key = key
     try:
-        rows = engine_for(key).cursor().execute(
+        db = engine_for(key)
+        progress("reading schemas")
+        rows = db.cursor().execute(
             "SELECT database_name, schema_name, table_name, column_name, data_type FROM duckdb_columns()"
             " WHERE NOT internal AND database_name NOT IN ('system', 'temp') ORDER BY ALL").fetchall()
         if gen == GEN[0]:
@@ -345,6 +378,9 @@ def catalog_job(key):
     except Exception as e:  # surfaced by /api/catalog; never kills the server
         if gen == GEN[0]:
             CATALOG_ERRORS[key] = f"{type(e).__name__}: {e}"
+    finally:
+        PROGRESS.pop(key, None)
+        progress("done")
 
 
 def start_cataloging(key):
@@ -551,7 +587,7 @@ def catalog(response: Response, user=Depends(current_user)):
         raise HTTPException(500, CATALOG_ERRORS.pop(key))  # popped so the next poll retries
     start_cataloging(key)
     response.status_code = 202
-    return {"building": True}
+    return {"building": True, "progress": PROGRESS.get(key)}
 
 
 @app.post("/api/catalog/refresh")
