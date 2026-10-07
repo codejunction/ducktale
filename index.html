@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ducktale</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/sql-formatter@15.9.0/dist/sql-formatter.min.js"></script>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --border: #e3e6ea; --text: #1d2330; --muted: #6b7280;
+    --accent: #e8a317; --accent-ink: #1d2330; --danger: #c0352b; --hover: #f0f2f5; --code: #fbfbfc;
+    --syn-keyword: #cf222e; --syn-type: #8250df; --syn-string: #0a3069; --syn-number: #0550ae;
+    --syn-comment: #6e7781; --syn-operator: #cf222e; --syn-var: #953800; --syn-active: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111318; --panel: #181b22; --border: #2a2f3a; --text: #e6e8ec; --muted: #9098a6;
+            --hover: #20242d; --code: #14171d; --danger: #ef6b5f;
+            --syn-keyword: #c678dd; --syn-type: #e5c07b; --syn-string: #98c379; --syn-number: #d19a66;
+            --syn-comment: #7f848e; --syn-operator: #56b6c2; --syn-var: #e06c75; --syn-active: #1b1f27; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: grid; grid-template: 48px 1fr / 300px 1fr;
+         font: 14px/1.45 Inter, system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  header { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; padding: 0 16px;
+           background: var(--panel); border-bottom: 1px solid var(--border); }
+  header b { font-size: 16px; letter-spacing: .2px; } header .logo { font-size: 20px; }
+  header small { color: var(--muted); }
+  aside { overflow: auto; background: var(--panel); border-right: 1px solid var(--border); }
+  main { overflow: auto; padding: 16px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+  main > * { flex-shrink: 0; }
+  section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+  h2 { margin: 0 0 10px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; }
+  .card > h2 { padding: 12px 14px 0; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
+  input, select, textarea { width: 100%; font: inherit; color: var(--text); background: var(--code);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  textarea { font: 13px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; resize: vertical; }
+  button { font: inherit; font-weight: 500; cursor: pointer; border-radius: 6px; padding: 6px 12px;
+           border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+  button:hover:not(:disabled) { background: var(--hover); }
+  button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.primary:hover:not(:disabled) { background: #f0b232; border-color: #f0b232; }
+  button.icon { border: 0; background: none; color: var(--muted); padding: 2px 6px; }
+  button.icon:hover { color: var(--danger); }
+  .source { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; }
+  .source:hover { background: var(--hover); }
+  .source .name { flex: 1; font-weight: 500; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #2fa84f; }
+  .badge { font-size: 11px; color: var(--muted); border: 1px solid var(--border); border-radius: 10px; padding: 0 7px; }
+  .empty { color: var(--muted); font-size: 13px; }
+  details { border-radius: 6px; } details[open] { background: var(--hover); }
+  summary { padding: 4px 8px; cursor: pointer; border-radius: 6px; }
+  #catalog summary { font: 13px ui-monospace, Consolas, monospace; }
+  summary:hover { background: var(--hover); }
+  .col { display: flex; justify-content: space-between; padding: 2px 8px 2px 26px; font: 12px ui-monospace, Consolas, monospace; }
+  .col span:last-child { color: var(--muted); }
+  .editor { padding: 0; overflow: hidden; }
+  .editor .CodeMirror { height: 240px; font: 13px/1.5 ui-monospace, "Cascadia Code", Consolas, monospace; background: var(--code); color: var(--text); padding: 6px 0; font-variant-ligatures: none; }
+  .CodeMirror-gutters { background: var(--code); border-right: 1px solid var(--border); }
+  .CodeMirror-linenumber { color: var(--muted); } .CodeMirror-cursor { border-left-color: var(--text); }
+  .CodeMirror-selected, .CodeMirror-focused .CodeMirror-selected { background: #e8a31733 !important; }
+  .cm-s-default .cm-keyword { color: var(--syn-keyword); font-weight: 600; }
+  .cm-s-default .cm-builtin, .cm-s-default .cm-type { color: var(--syn-type); }
+  .cm-s-default .cm-string, .cm-s-default .cm-string-2 { color: var(--syn-string); }
+  .cm-s-default .cm-number, .cm-s-default .cm-atom { color: var(--syn-number); }
+  .cm-s-default .cm-comment { color: var(--syn-comment); font-style: italic; }
+  .cm-s-default .cm-operator { color: var(--syn-operator); }
+  .cm-s-default .cm-variable-3 { color: var(--syn-var); }
+  .cm-s-default .cm-variable-2 { color: var(--text); }
+  .cm-s-default .cm-variable, .cm-s-default .cm-punctuation { color: var(--text); }
+  .cm-s-default .cm-bracket { color: var(--muted); }
+  .CodeMirror-activeline-background { background: var(--syn-active); }
+  .CodeMirror-activeline .CodeMirror-gutter-elt { color: var(--text); }
+  .CodeMirror-matchingbracket { outline: 1px solid var(--accent); color: inherit !important; }
+  .toolbar { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-top: 1px solid var(--border); }
+  .toolbar .hint { margin-left: auto; color: var(--muted); font-size: 12px; }
+  kbd { font: 11px ui-monospace, monospace; border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 4px; padding: 0 4px; }
+  .results { overflow: auto; max-height: 55vh; }
+  table { border-collapse: collapse; width: 100%; font: 13px ui-monospace, Consolas, monospace; }
+  th { position: sticky; top: 0; background: var(--panel); text-align: left; font-weight: 600;
+       border-bottom: 1px solid var(--border); padding: 8px 12px; white-space: nowrap; }
+  td { padding: 6px 12px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  tr:nth-child(even) td { background: var(--code); }
+  td.null { color: var(--muted); font-style: italic; }
+  .placeholder { padding: 28px; text-align: center; color: var(--muted); }
+  .err { color: var(--danger); white-space: pre-wrap; font: 13px ui-monospace, Consolas, monospace; padding: 14px; }
+  #addmsg { padding: 10px 0 0; font-size: 12px; } #addmsg.err { padding: 10px 0 0; }
+  .addbtn { width: 100%; margin-top: 8px; }
+  dialog { border: 1px solid var(--border); border-radius: 10px; padding: 0; width: min(540px, calc(100vw - 32px));
+           background: var(--panel); color: var(--text); box-shadow: 0 24px 64px #0007; }
+  dialog::backdrop { background: #0009; backdrop-filter: blur(2px); }
+  .modal-head, .modal-foot { display: flex; align-items: center; gap: 8px; padding: 14px 18px; }
+  .modal-head { border-bottom: 1px solid var(--border); } .modal-head h3 { margin: 0; font-size: 16px; flex: 1; }
+  .modal-foot { border-top: 1px solid var(--border); justify-content: flex-end; }
+  .modal-body { padding: 6px 18px 18px; max-height: 70vh; overflow: auto; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+  .seg { display: inline-flex; margin: 16px 0 4px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; border-radius: 0; color: var(--muted); }
+  .seg button[aria-pressed="true"] { background: var(--hover); color: var(--text); font-weight: 600; }
+  .optional { font-weight: 400; opacity: .75; }
+  .hint-text { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  * { scrollbar-width: thin; scrollbar-color: #000 transparent; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-thumb { background: #000; border-radius: 3px; }
+  ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+  .history li { display: flex; gap: 10px; align-items: baseline; padding: 8px 14px; border-top: 1px solid var(--border); cursor: pointer; }
+  .history li:hover { background: var(--hover); }
+  .history code { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+  .pager { display: flex; align-items: center; justify-content: flex-end; gap: 10px; padding: 10px 14px; border-top: 1px solid var(--border); }
+  .pager span { color: var(--muted); font-size: 12px; }
+  .history time { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .status-SUCCESS, .status-FAILED { font-size: 11px; font-weight: 600; border-radius: 10px; padding: 1px 8px; }
+  .status-SUCCESS { color: #1e7e3c; background: #2fa84f22; } .status-FAILED { color: var(--danger); background: #c0352b1f; }
+  @media (max-width: 760px) { body { grid-template: 48px auto 1fr / 1fr; } aside { border-right: 0; max-height: 40vh; } }
+</style>
+</head>
+<body>
+<header><span class="logo" aria-hidden="true">🦆</span><b>Ducktale</b><small>Federated SQL on DuckDB</small></header>
+<aside>
+  <section>
+    <h2>Datasources</h2>
+    <ul id="sources"></ul>
+    <button id="openadd" class="addbtn">＋ Add datasource</button>
+  </section>
+  <section>
+    <h2>Catalog</h2>
+    <div id="catalog"></div>
+  </section>
+</aside>
+<main>
+  <div class="card editor">
+    <label for="sql" style="position:absolute;left:-9999px">SQL</label>
+    <textarea id="sql" spellcheck="false">SELECT 42;</textarea>
+    <div class="toolbar">
+      <button id="run" class="primary">▶ Run</button>
+      <button id="cancel" disabled>Cancel</button>
+      <button id="format" title="Format SQL (Shift+Alt+F)">{ } Format</button>
+      <span id="status" role="status"></span>
+      <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> to run</span>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Results</h2>
+    <div id="result" class="results"><div class="placeholder">Run a query to see results.</div></div>
+  </div>
+  <div class="card">
+    <h2>History</h2>
+    <ul id="history" class="history"></ul>
+    <nav class="pager" aria-label="History pages">
+      <button id="prev">‹ Prev</button>
+      <span id="pageinfo"></span>
+      <button id="next">Next ›</button>
+    </nav>
+  </div>
+</main>
+<dialog id="addmodal" aria-labelledby="addtitle">
+  <form id="add" novalidate>
+    <div class="modal-head"><h3 id="addtitle">Add datasource</h3><button type="button" class="icon" data-close aria-label="Close">✕</button></div>
+    <div class="modal-body">
+      <div class="row2">
+        <div><label for="f-name">Name</label><input id="f-name" name="name" required pattern="[A-Za-z_]\w*" placeholder="crm" title="Letters, digits and underscores; used in SQL as name.schema.table"></div>
+        <div><label for="f-type">Type</label>
+          <select id="f-type" name="type">
+            <option value="postgres">PostgreSQL</option><option value="sqlserver">SQL Server</option><option value="mongo">MongoDB</option>
+            <option value="iceberg">Iceberg / IOMETE</option><option value="s3">S3 / S3-compatible</option><option value="files">Local files</option>
+          </select></div>
+      </div>
+      <div class="seg" role="group" aria-label="Input mode">
+        <button type="button" id="mode-form" aria-pressed="true">Form</button><button type="button" id="mode-json" aria-pressed="false">Paste JSON</button>
+      </div>
+      <fieldset id="fields"></fieldset>
+      <div id="jsonbox" hidden><label for="f-config">Connection (JSON)</label><textarea id="f-config" rows="10" spellcheck="false"></textarea></div>
+      <div id="addmsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><button type="button" data-close>Cancel</button><button class="primary" id="savebtn">Test &amp; save</button></div>
+  </form>
+</dialog>
+<script>
+const $ = id => document.getElementById(id);
+const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
+const api = async (path, opts = {}) => {
+  const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+  const body = await r.json();
+  if (!r.ok) throw new Error(body.detail);
+  return body;
+};
+// Form fields per datasource type. key 'a.b' nests into config; kind 'kv' = "name = path" lines;
+// kind 'hidden' is only set when its parent object has other values (e.g. secret.TYPE).
+const host = (port) => [
+  { key: 'host', label: 'Host', placeholder: 'db.example.com', required: true },
+  { key: 'port', label: 'Port', kind: 'number', value: port, required: true },
+  { key: 'database', label: 'Database', required: true },
+  { key: 'user', label: 'Username', required: true },
+  { key: 'password', label: 'Password', kind: 'password', required: true },
+];
+const FIELDS = {
+  postgres: host(5432),
+  sqlserver: [...host(1433), { key: 'encrypt', label: 'Encrypt connection', kind: 'select', options: ['yes', 'no'] }],
+  mongo: [{ key: 'uri', label: 'Connection URI', kind: 'password', placeholder: 'mongodb://user:pass@host:27017', required: true }],
+  iceberg: [
+    { key: 'warehouse', label: 'Warehouse', required: true },
+    { key: 'endpoint', label: 'REST catalog endpoint', placeholder: 'https://catalog.example.com', required: true },
+    { key: 'secret.TOKEN', label: 'Access token', kind: 'password' },
+  ],
+  s3: [
+    { key: 'secret.ENDPOINT', label: 'Endpoint', placeholder: 'Blank for AWS, e.g. http://minio:9000 or https://<account>.r2.cloudflarestorage.com',
+      hint: 'Any S3-compatible store (MinIO, R2, Ceph, Wasabi…). http:// turns SSL off; path-style URLs are used for custom endpoints.' },
+    { key: 'bucket', label: 'Bucket', placeholder: 'company-data', required: true },
+    { key: 'secret.REGION', label: 'Region', placeholder: 'us-east-1' },
+    { key: 'secret.KEY_ID', label: 'Access key' },
+    { key: 'secret.SECRET', label: 'Secret key', kind: 'password' },
+    { key: 'secret.TYPE', kind: 'hidden', value: 's3' },
+    { key: 'tables', label: 'Tables', kind: 'kv', placeholder: 'orders = sales/orders/*.parquet\ncustomers = crm/customers.csv',
+      hint: 'One per line: table_name = path inside the bucket (globs allowed). Format comes from the extension.', required: true },
+  ],
+  files: [
+    { key: 'tables', label: 'Tables', kind: 'kv', placeholder: 'orders = /data/orders/*.parquet\ncustomers = /data/customers.csv',
+      hint: 'One per line: table_name = local path or glob. Parquet, CSV and JSON are detected from the extension.', required: true },
+  ],
+};
+const getPath = (o, key) => key.split('.').reduce((v, k) => v?.[k], o);
+const setPath = (o, key, v) => { const ks = key.split('.'), last = ks.pop(); ks.reduce((x, k) => x[k] ??= {}, o)[last] = v; };
+const fieldsOf = () => FIELDS[$('f-type').value];
+
+function renderFields(cfg = {}) {
+  $('fields').replaceChildren(...fieldsOf().filter(f => f.kind !== 'hidden').map(f => {
+    const id = 'fld-' + f.key, wrap = el('div'), label = el('label', f.label);
+    label.htmlFor = id;
+    if (!f.required) label.append(el('span', ' (optional)', 'optional'));
+    const input = f.kind === 'select' ? el('select') : f.kind === 'kv' ? el('textarea') : el('input');
+    if (f.kind === 'select') input.append(...f.options.map(o => el('option', o)));
+    if (f.kind === 'kv') input.rows = 3; else if (f.kind !== 'select') input.type = f.kind || 'text';
+    Object.assign(input, { id, required: !!f.required, placeholder: f.placeholder ?? '', autocomplete: 'off' });
+    const v = getPath(cfg, f.key) ?? f.value;
+    if (v != null) input.value = f.kind === 'kv' ? Object.entries(v).map(([k, p]) => `${k} = ${p}`).join('\n') : v;
+    wrap.append(label, input);
+    if (f.hint) wrap.append(el('div', f.hint, 'hint-text'));
+    return wrap;
+  }));
+}
+
+function formConfig() {
+  const cfg = {};
+  for (const f of fieldsOf()) {
+    if (f.kind === 'hidden') continue;
+    let v = $('fld-' + f.key).value.trim();
+    if (!v) continue;
+    if (f.kind === 'number') v = Number(v);
+    if (f.kind === 'kv') v = Object.fromEntries(v.split('\n').filter(l => l.includes('=')).map(l => {
+      const i = l.indexOf('='); return [l.slice(0, i).trim(), l.slice(i + 1).trim()];
+    }));
+    setPath(cfg, f.key, v);
+  }
+  for (const f of fieldsOf()) if (f.kind === 'hidden' && getPath(cfg, f.key.split('.')[0])) setPath(cfg, f.key, f.value);
+  return cfg;
+}
+
+let jsonMode = false;
+function setMode(json) {
+  if (json === jsonMode) return;
+  if (json) $('f-config').value = JSON.stringify(formConfig(), null, 2);
+  else try { renderFields(JSON.parse($('f-config').value || '{}')); } catch { renderFields(); }
+  jsonMode = json;
+  $('jsonbox').hidden = !json; $('fields').hidden = $('fields').disabled = json;
+  $('mode-form').ariaPressed = String(!json); $('mode-json').ariaPressed = String(json);
+}
+$('mode-form').onclick = () => setMode(false);
+$('mode-json').onclick = () => setMode(true);
+$('f-type').onchange = () => { renderFields(); if (jsonMode) $('f-config').value = JSON.stringify(formConfig(), null, 2); };
+$('openadd').onclick = () => {
+  $('add').reset(); setMode(false); renderFields(); $('addmsg').textContent = '';
+  $('addmodal').showModal(); $('f-name').focus();
+};
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $('addmodal').close());
+$('addmodal').onclick = e => { if (e.target === $('addmodal')) $('addmodal').close(); };
+
+async function refresh() {
+  const sources = await api('/api/datasources');
+  $('sources').replaceChildren(...(sources.length ? sources.map(s => {
+    const li = el('li', null, 'source'), del = el('button', '✕', 'icon');
+    del.title = del.ariaLabel = `Delete ${s.name}`;
+    del.onclick = async () => { await api(`/api/datasources/${s.name}`, { method: 'DELETE' }); refresh(); };
+    li.append(el('span', null, 'dot'), el('span', s.name, 'name'), el('span', s.type, 'badge'), del); return li;
+  }) : [el('li', 'No datasources yet.', 'empty')]));
+  const tables = {};
+  for (const c of await api('/api/catalog')) (tables[`${c.database}.${c.schema}.${c.table}`] ??= []).push(c);
+  const entries = Object.entries(tables);
+  $('catalog').replaceChildren(...(entries.length ? entries.map(([t, cols]) => {
+    const d = el('details'), s = el('summary', t);
+    s.title = 'Double-click to insert'; s.ondblclick = () => { editor.replaceSelection(t); editor.focus(); };
+    d.append(s, ...cols.map(c => { const row = el('div', null, 'col'); row.append(el('span', c.column), el('span', c.type)); return row; }));
+    return d;
+  }) : [el('div', 'Tables appear here once a datasource is added.', 'empty')]));
+  loadHistory(0);
+}
+
+const PAGE = 10;
+let page = 0;
+async function loadHistory(p = page) {
+  const { total, items } = await api(`/api/history?offset=${p * PAGE}&limit=${PAGE}`);
+  page = p;
+  const pages = Math.max(1, Math.ceil(total / PAGE));
+  $('history').replaceChildren(...(items.length ? items.map(h => {
+    const li = el('li'); li.title = h.error || h.sql;
+    li.append(el('span', h.status === 'SUCCESS' ? `${h.rows} row${h.rows === 1 ? '' : 's'}` : 'failed', `status-${h.status}`), el('code', h.sql), el('time', h.at));
+    li.onclick = () => { editor.setValue(h.sql); editor.setCursor(0, 0); editor.focus(); }; return li;
+  }) : [el('li', 'No queries yet.', 'empty')]));
+  $('pageinfo').textContent = `Page ${page + 1} of ${pages} · ${total.toLocaleString()} queries`;
+  $('prev').disabled = page === 0;
+  $('next').disabled = page >= pages - 1;
+}
+$('prev').onclick = () => loadHistory(page - 1);
+$('next').onclick = () => loadHistory(page + 1);
+
+$('add').onsubmit = async e => {
+  e.preventDefault();
+  if (!e.target.reportValidity()) return;
+  const msg = $('addmsg');
+  let config;
+  try { config = jsonMode ? JSON.parse($('f-config').value) : formConfig(); }
+  catch (err) { msg.className = 'err'; msg.textContent = `Invalid JSON: ${err.message}`; return; }
+  msg.className = ''; msg.textContent = 'Testing connection…'; $('savebtn').disabled = true;
+  try {
+    await api('/api/datasources', { method: 'POST', body: JSON.stringify({ name: $('f-name').value, type: $('f-type').value, config }) });
+    $('addmodal').close(); refresh();
+  } catch (err) { msg.className = 'err'; msg.textContent = err.message; }
+  $('savebtn').disabled = false;
+};
+
+let current = null;
+async function run() {
+  if (current) return;
+  current = crypto.randomUUID(); const t0 = performance.now();
+  $('run').disabled = true; $('cancel').disabled = false; $('status').textContent = 'Running…';
+  try {
+    const r = await api('/api/query', { method: 'POST', body: JSON.stringify({ id: current, sql: editor.getValue() }) });
+    const table = el('table'), head = el('tr');
+    head.append(...r.columns.map(c => el('th', c)));
+    table.append(head, ...r.rows.map(row => {
+      const tr = el('tr');
+      tr.append(...row.map(v => v === null ? el('td', 'NULL', 'null') : el('td', typeof v === 'object' ? JSON.stringify(v) : v)));
+      return tr;
+    }));
+    $('result').replaceChildren(r.columns.length ? table : el('div', 'Statement executed.', 'placeholder'));
+    $('status').textContent = `${r.rows.length.toLocaleString()}${r.truncated ? '+' : ''} rows · ${((performance.now() - t0) / 1000).toFixed(2)}s`;
+  } catch (err) { $('status').textContent = ''; $('result').replaceChildren(el('div', err.message, 'err')); }
+  current = null; $('run').disabled = false; $('cancel').disabled = true; loadHistory(0);
+}
+$('run').onclick = run;
+$('cancel').onclick = () => current && api(`/api/query/${current}/cancel`, { method: 'POST' });
+// DuckDB SQL = Postgres keywords + DuckDB extras, so WITH/FILTER/QUALIFY etc. all highlight.
+const pg = CodeMirror.resolveMode('text/x-pgsql');
+const extra = 'qualify filter window pivot unpivot asof positional exclude replace columns struct map union_by_name ' +
+  'install load attach detach pragma summarize describe semi anti macro ilike glob similar';
+CodeMirror.defineMIME('text/x-duckdb', { ...pg, keywords: { ...pg.keywords, ...Object.fromEntries(extra.split(' ').map(k => [k, true])) } });
+function formatSql() {
+  try {
+    const cursor = editor.getCursor();
+    editor.setValue(sqlFormatter.format(editor.getValue(), { language: 'duckdb', keywordCase: 'upper', tabWidth: 4 }));
+    editor.setCursor(cursor);
+  } catch (err) { $('status').textContent = `Format failed: ${err.message.split('\n')[0]}`; }
+  editor.focus();
+}
+const editor = CodeMirror.fromTextArea($('sql'), {
+  mode: 'text/x-duckdb', lineNumbers: true, indentUnit: 4, smartIndent: true, matchBrackets: true, styleActiveLine: true,
+  extraKeys: { 'Ctrl-Enter': run, 'Cmd-Enter': run, 'Shift-Alt-F': formatSql },
+});
+$('format').onclick = formatSql;
+refresh();
+</script>
+</body>
+</html>
