@@ -129,9 +129,12 @@ def sqlserver(n, c):  # credentials go through a secret: a DSN in ATTACH would s
             f"ATTACH '' AS {ident(n)} (TYPE mssql, SECRET {ident(n)}, READ_ONLY)"], []
 
 
+MONGO_SCHEMA_SAMPLE = 10_000  # random documents per collection; covers small collections completely
+
+
 def mongo(db, n, c, test=False):
     """Every database becomes a schema and every collection a view, typed by analysing a random sample of documents
-    (sample_size, default 10,000) instead of the extension's first-documents guess. Nested documents become STRUCTs,
+    instead of the extension's first-documents guess (which misses late fields). Nested documents become STRUCTs,
     arrays LISTs, int+double DOUBLE. Views read through a secret, so the URI (with password) never reaches user SQL."""
     u = urlsplit(c["uri"])
     if "," in u.netloc:
@@ -159,9 +162,9 @@ def mongo(db, n, c, test=False):
     if test:  # listing collections already proved host, credentials and auth mechanism
         return []
     db.execute(f"ATTACH ':memory:' AS {ident(n)}")
-    sample = int(c.get("sample_size", 10_000))
+
     for dbname, coll in colls:
-        pipeline = json.dumps([{"$sample": {"size": sample}}, {"$project": {"_id": 0, "doc": "$$ROOT"}}])
+        pipeline = json.dumps([{"$sample": {"size": MONGO_SCHEMA_SAMPLE}}, {"$project": {"_id": 0, "doc": "$$ROOT"}}])
         docs = db.execute(f"SELECT doc FROM mongo_scan({lit(n)}, ?, ?, pipeline = ?, columns = {{'doc': 'VARCHAR'}})",
                           [dbname, coll, pipeline]).fetchall()
         schema = merge_types([infer_type(json.loads(d)) for (d,) in docs if d]) or {"_id": "VARCHAR"}

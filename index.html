@@ -290,8 +290,6 @@ const FIELDS = {
   mongo: [
     { key: 'uri', label: 'Connection URI', kind: 'password', placeholder: 'mongodb://user:pass@host:27017/?authSource=admin', required: true,
       hint: 'Every database becomes a schema and every collection a table. The user is authenticated against ?authSource=…, else the database in the path (/shop), else admin.' },
-    { key: 'sample_size', label: 'Documents sampled per collection', kind: 'number', value: 10000,
-      hint: 'Random documents analysed to build each schema. Nested documents become STRUCTs (campaign.name), arrays LISTs.' },
   ],
   iceberg: [
     { key: 'warehouse', label: 'Warehouse / catalog', required: true, placeholder: 'lakehouse',
