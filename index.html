@@ -9,6 +9,8 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/sql/sql.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/edit/matchbrackets.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/selection/active-line.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/hint/show-hint.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sql-formatter@15.9.0/dist/sql-formatter.min.js"></script>
 <style>
   :root {
@@ -121,11 +123,32 @@
   .history time { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .status-SUCCESS, .status-FAILED { font-size: 11px; font-weight: 600; border-radius: 10px; padding: 1px 8px; }
   .status-SUCCESS { color: #1e7e3c; background: #2fa84f22; } .status-FAILED { color: var(--danger); background: #c0352b1f; }
+  header .spacer { flex: 1; } header .who { color: var(--muted); font-size: 13px; }
+  .dot.bad { background: var(--danger); }
+  h2 { display: flex; align-items: center; } h2 .icon { margin-left: auto; font-size: 13px; }
+  h2 .icon:hover { color: var(--text); }
+  .saved li { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+  .saved li:hover { background: var(--hover); } .saved li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .toolbar .sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }
+  pre.plan { margin: 0; padding: 14px; font: 12px/1.35 ui-monospace, Consolas, monospace; overflow: auto; }
+  .check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text); margin: 6px 0; }
+  .check input { width: auto; }
+  .userlist li { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .userlist li span:first-child { flex: 1; }
+  .login-note { font-size: 12px; color: var(--muted); margin-top: 10px; }
+  .CodeMirror-hints { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 8px 24px #0005;
+                      font: 12px ui-monospace, Consolas, monospace; z-index: 10; }
+  .CodeMirror-hint { color: var(--text); padding: 2px 8px; }
+  li.CodeMirror-hint-active { background: var(--accent); color: var(--accent-ink); }
+  .CodeMirror-hint small { opacity: .6; margin-left: 10px; }
+  .CodeMirror-hint::before { display: inline-block; width: 16px; opacity: .7; }
+  .hint-col::before { content: "c"; } .hint-table::before { content: "t"; } .hint-schema::before { content: "s"; }
+  .hint-kw::before { content: "k"; } .hint-kw { color: var(--syn-keyword) !important; }
   @media (max-width: 760px) { body { grid-template: 48px auto 1fr / 1fr; } aside { border-right: 0; max-height: 40vh; } }
 </style>
 </head>
 <body>
-<header><span class="logo" aria-hidden="true">🦆</span><b>Ducktale</b><small>Federated SQL on DuckDB</small></header>
+<header><span class="logo" aria-hidden="true">🦆</span><b>Ducktale</b><small>Federated SQL on DuckDB</small><span class="spacer"></span><span class="who" id="who"></span><button id="openusers" hidden>Users</button><button id="logout">Sign out</button></header>
 <aside>
   <section>
     <h2>Datasources</h2>
@@ -133,7 +156,11 @@
     <button id="openadd" class="addbtn">＋ Add datasource</button>
   </section>
   <section>
-    <h2>Catalog</h2>
+    <h2>Saved queries</h2>
+    <ul id="saved" class="saved"></ul>
+  </section>
+  <section>
+    <h2>Catalog <button class="icon" id="refreshcat" title="Refresh catalog (re-read schemas from all sources)" aria-label="Refresh catalog">↻</button></h2>
     <div id="catalog"></div>
   </section>
 </aside>
@@ -144,7 +171,12 @@
     <div class="toolbar">
       <button id="run" class="primary">▶ Run</button>
       <button id="cancel" disabled>Cancel</button>
+      <button id="explain" title="Show the query plan: what is pushed down to each source">Explain</button>
       <button id="format" title="Format SQL (Shift+Alt+F)">{ } Format</button>
+      <span class="sep"></span>
+      <button id="save" title="Save query">Save</button>
+      <button id="export-csv" title="Download the full result as CSV (no row limit)">⤓ CSV</button>
+      <button id="export-ndjson" title="Download the full result as JSON lines (no row limit)">⤓ JSON</button>
       <span id="status" role="status"></span>
       <span class="hint"><kbd>Ctrl</kbd> + <kbd>Enter</kbd> to run</span>
     </div>
@@ -185,12 +217,54 @@
     <div class="modal-foot"><button type="button" data-close>Cancel</button><button class="primary" id="savebtn">Test &amp; save</button></div>
   </form>
 </dialog>
+<dialog id="loginmodal" aria-labelledby="logintitle">
+  <form id="loginform">
+    <div class="modal-head"><h3 id="logintitle">Sign in to Ducktale</h3></div>
+    <div class="modal-body">
+      <label for="l-email">Email</label><input id="l-email" type="email" required autocomplete="username">
+      <label for="l-password">Password</label><input id="l-password" type="password" required minlength="8" autocomplete="current-password">
+      <div class="login-note" id="setupnote" hidden>First sign-in: this creates the admin account.</div>
+      <div id="loginmsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><button class="primary">Sign in</button></div>
+  </form>
+</dialog>
+<dialog id="savemodal" aria-labelledby="savetitle">
+  <form id="saveform">
+    <div class="modal-head"><h3 id="savetitle">Save query</h3><button type="button" class="icon" data-close aria-label="Close">✕</button></div>
+    <div class="modal-body">
+      <label for="s-name">Name</label><input id="s-name" required placeholder="Monthly revenue by segment">
+      <div class="hint-text">Saving with an existing name replaces that query.</div>
+      <div id="savemsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><button type="button" data-close>Cancel</button><button class="primary">Save</button></div>
+  </form>
+</dialog>
+<dialog id="usersmodal" aria-labelledby="userstitle">
+  <form id="userform">
+    <div class="modal-head"><h3 id="userstitle">Users</h3><button type="button" class="icon" data-close aria-label="Close">✕</button></div>
+    <div class="modal-body">
+      <ul id="userlist" class="userlist"></ul>
+      <h2 style="margin-top:18px">Add or update user</h2>
+      <div class="row2">
+        <div><label for="u-email">Email</label><input id="u-email" type="email" required autocomplete="off"></div>
+        <div><label for="u-password">Password</label><input id="u-password" type="password" required minlength="8" autocomplete="new-password"></div>
+      </div>
+      <label class="check"><input type="checkbox" id="u-admin"> Admin (manages datasources and users, sees everything)</label>
+      <label class="check"><input type="checkbox" id="u-all" checked> All datasources, including future ones</label>
+      <div id="u-sources"></div>
+      <div id="usermsg" role="status"></div>
+    </div>
+    <div class="modal-foot"><button type="button" data-close>Close</button><button class="primary">Save user</button></div>
+  </form>
+</dialog>
 <script>
 const $ = id => document.getElementById(id);
 const el = (tag, text, cls) => { const e = document.createElement(tag); if (text != null) e.textContent = text; if (cls) e.className = cls; return e; };
 const api = async (path, opts = {}) => {
   const r = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts });
   const body = await r.json();
+  if (r.status === 401 && path !== '/api/login') showLogin();
   if (!r.ok) throw new Error(body.detail);
   return body;
 };
@@ -199,16 +273,19 @@ const api = async (path, opts = {}) => {
 const host = (port) => [
   { key: 'host', label: 'Host', placeholder: 'db.example.com', required: true },
   { key: 'port', label: 'Port', kind: 'number', value: port, required: true },
-  { key: 'database', label: 'Database', required: true },
+  { key: 'database', label: 'Database', required: true, placeholder: 'sales',
+    hint: 'One database, several separated by commas, or * for every database on the server (PostgreSQL). Several become catalogs name_db.' },
   { key: 'user', label: 'Username', required: true },
   { key: 'password', label: 'Password', kind: 'password', required: true },
 ];
 const FIELDS = {
   postgres: host(5432),
   sqlserver: [...host(1433), { key: 'encrypt', label: 'Encrypt connection', kind: 'select', options: ['yes', 'no'] }],
-  mongo: [{ key: 'uri', label: 'Connection URI', kind: 'password', placeholder: 'mongodb://user:pass@host:27017', required: true }],
+  mongo: [{ key: 'uri', label: 'Connection URI', kind: 'password', placeholder: 'mongodb://user:pass@host:27017', required: true,
+    hint: 'Every database on the server becomes a schema and every collection a table: name.database.collection.' }],
   iceberg: [
-    { key: 'warehouse', label: 'Warehouse', required: true },
+    { key: 'warehouse', label: 'Warehouse / catalog', required: true, placeholder: 'lakehouse',
+      hint: 'Several catalogs separated by commas become name_catalog. Namespaces and tables are discovered automatically.' },
     { key: 'endpoint', label: 'REST catalog endpoint', placeholder: 'https://catalog.example.com', required: true },
     { key: 'secret.TOKEN', label: 'Access token', kind: 'password' },
   ],
@@ -281,17 +358,28 @@ $('openadd').onclick = () => {
   $('add').reset(); setMode(false); renderFields(); $('addmsg').textContent = '';
   $('addmodal').showModal(); $('f-name').focus();
 };
-document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $('addmodal').close());
-$('addmodal').onclick = e => { if (e.target === $('addmodal')) $('addmodal').close(); };
+document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
+document.querySelectorAll('dialog:not(#loginmodal)').forEach(d => d.onclick = e => { if (e.target === d) d.close(); });
 
+let me = null;
 async function refresh() {
+  me = await api('/api/me');
+  $('who').textContent = me.email + (me.admin ? ' · admin' : '');
+  $('openusers').hidden = $('openadd').hidden = !me.admin;
   const sources = await api('/api/datasources');
   $('sources').replaceChildren(...(sources.length ? sources.map(s => {
-    const li = el('li', null, 'source'), del = el('button', '✕', 'icon');
-    del.title = del.ariaLabel = `Delete ${s.name}`;
-    del.onclick = async () => { await api(`/api/datasources/${s.name}`, { method: 'DELETE' }); refresh(); };
-    li.append(el('span', null, 'dot'), el('span', s.name, 'name'), el('span', s.type, 'badge'), del); return li;
-  }) : [el('li', 'No datasources yet.', 'empty')]));
+    const li = el('li', null, 'source'), dot = el('span', null, s.error ? 'dot bad' : 'dot');
+    dot.title = s.error || 'Connected';
+    li.append(dot, el('span', s.name, 'name'), el('span', s.type, 'badge'));
+    if (me.admin) {
+      const del = el('button', '✕', 'icon');
+      del.title = del.ariaLabel = `Delete ${s.name}`;
+      del.onclick = async () => { if (confirm(`Delete datasource ${s.name}?`)) { await api(`/api/datasources/${s.name}`, { method: 'DELETE' }); refresh(); } };
+      li.append(del);
+    }
+    return li;
+  }) : [el('li', me.admin ? 'No datasources yet.' : 'No datasources shared with you yet.', 'empty')]));
+  loadSaved();
   const tables = {};
   for (const c of await api('/api/catalog')) (tables[`${c.database}.${c.schema}.${c.table}`] ??= []).push(c);
   const entries = Object.entries(tables);
@@ -301,8 +389,142 @@ async function refresh() {
     d.append(s, ...cols.map(c => { const row = el('div', null, 'col'); row.append(el('span', c.column), el('span', c.type)); return row; }));
     return d;
   }) : [el('div', 'Tables appear here once a datasource is added.', 'empty')]));
+  // Autocomplete tree: catalog -> schema -> table -> columns. File/S3 tables live in DuckDB's "memory" catalog and are
+  // queried as schema.table, so that level is dropped for them.
+  TREE = {}; FULL_NAMES = [];
+  for (const [t, cols] of entries) {
+    const [d, sc, tb] = t.split('.'), path = d === 'memory' ? [sc, tb] : [d, sc, tb];
+    let node = TREE;
+    for (const k of path.slice(0, -1)) node = node[k] ??= {};
+    node[tb] = cols; FULL_NAMES.push(path.join('.'));
+  }
   loadHistory(0);
 }
+
+let TREE = {}, FULL_NAMES = [];
+// Context-aware suggestions: after "a.b." list what is inside a.b (schemas, tables or columns, incl. aliases);
+// otherwise columns of tables already in the query, then catalogs, tables and keywords that match the typed prefix.
+function sqlHints(cm) {
+  const cur = cm.getCursor(), word = /[\w.]*$/.exec(cm.getLine(cur.line).slice(0, cur.ch))[0];
+  const parts = word.split('.'), partial = parts.pop().toLowerCase();
+  const tables = {};
+  for (const name of FULL_NAMES) {
+    const cols = name.split('.').reduce((n, k) => n[k], TREE);
+    tables[name] = cols; tables[name.split('.').slice(-2).join('.')] ??= cols; tables[name.split('.').pop()] ??= cols;
+  }
+  const inQuery = {};
+  for (const m of cm.getValue().matchAll(/\b(?:from|join)\s+([\w.]+)(?:\s+(?:as\s+)?(\w+))?/gi)) {
+    const cols = tables[m[1]];
+    if (!cols) continue;
+    inQuery[m[1].split('.').pop()] = cols;
+    if (m[2] && !NOT_ALIAS.has(m[2].toLowerCase())) inQuery[m[2]] = cols;
+  }
+  const col = c => ({ text: c.column, render: el => el.append(c.column, Object.assign(document.createElement('small'), { textContent: c.type })), className: 'hint-col' });
+  let items;
+  if (parts.length) {
+    const path = parts.join('.'), node = parts.reduce((n, k) => n?.[k], TREE);
+    if (Array.isArray(node)) items = node.map(col);
+    else if (node) items = Object.keys(node).map(k => ({ text: k, className: Array.isArray(node[k]) ? 'hint-table' : 'hint-schema' }));
+    else items = (inQuery[path] || tables[path] || []).map(col);
+  } else {
+    items = [
+      ...Object.values(inQuery).flat().map(col),
+      ...Object.keys(TREE).map(k => ({ text: k, className: 'hint-schema' })),
+      ...FULL_NAMES.map(k => ({ text: k, className: 'hint-table' })),
+      ...[...KEYWORDS].map(k => ({ text: k.toUpperCase(), className: 'hint-kw' })),
+    ];
+  }
+  const seen = new Set();
+  const matches = i => i.text.toLowerCase().startsWith(partial) ||
+    (i.className === 'hint-table' && partial && i.text.toLowerCase().split('.').some(p => p.startsWith(partial)));
+  const list = items.filter(i => matches(i) && !seen.has(i.text) && seen.add(i.text)).slice(0, 60);
+  return { list, from: CodeMirror.Pos(cur.line, cur.ch - partial.length), to: cur };
+}
+
+async function loadSaved() {
+  const saved = await api('/api/saved');
+  $('saved').replaceChildren(...(saved.length ? saved.map(q => {
+    const li = el('li'), del = el('button', '✕', 'icon');
+    li.title = q.sql; li.append(el('span', q.name), del);
+    li.onclick = () => { editor.setValue(q.sql); editor.setCursor(0, 0); editor.focus(); $('s-name').value = q.name; };
+    del.title = del.ariaLabel = `Delete saved query ${q.name}`;
+    del.onclick = async e => { e.stopPropagation(); await api(`/api/saved/${q.id}`, { method: 'DELETE' }); loadSaved(); };
+    return li;
+  }) : [el('li', 'Nothing saved yet.', 'empty')]));
+}
+
+function showLogin() {
+  if ($('loginmodal').open) return;
+  api('/api/setup').then(r => $('setupnote').hidden = !r.needed);
+  $('loginmodal').showModal(); $('l-email').focus();
+}
+$('loginmodal').oncancel = e => e.preventDefault();
+$('loginform').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    await api('/api/login', { method: 'POST', body: JSON.stringify({ email: $('l-email').value, password: $('l-password').value }) });
+    $('loginmodal').close(); $('l-password').value = ''; $('loginmsg').textContent = ''; refresh();
+  } catch (err) { $('loginmsg').className = 'err'; $('loginmsg').textContent = err.message; }
+};
+$('logout').onclick = async () => { await api('/api/logout', { method: 'POST' }); location.reload(); };
+
+$('save').onclick = () => { $('savemsg').textContent = ''; $('savemodal').showModal(); $('s-name').select(); };
+$('saveform').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    await api('/api/saved', { method: 'POST', body: JSON.stringify({ name: $('s-name').value, sql: editor.getValue() }) });
+    $('savemodal').close(); loadSaved();
+  } catch (err) { $('savemsg').className = 'err'; $('savemsg').textContent = err.message; }
+};
+
+$('refreshcat').onclick = async () => { await api('/api/catalog/refresh', { method: 'POST' }); refresh(); };
+
+async function exportResult(format) {
+  $('status').textContent = `Exporting ${format.toUpperCase()}…`;
+  const r = await fetch(`/api/export?format=${format}`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: crypto.randomUUID(), sql: editor.getValue() }) });
+  if (!r.ok) { $('status').textContent = ''; $('result').replaceChildren(el('div', (await r.json()).detail, 'err')); return; }
+  const a = el('a'); a.href = URL.createObjectURL(await r.blob()); a.download = `ducktale-export.${format}`; a.click();
+  URL.revokeObjectURL(a.href); $('status').textContent = 'Export downloaded.'; loadHistory(0);
+}
+$('export-csv').onclick = () => exportResult('csv');
+$('export-ndjson').onclick = () => exportResult('ndjson');
+
+async function loadUsers() {
+  const [users, sources] = await Promise.all([api('/api/users'), api('/api/datasources')]);
+  $('userlist').replaceChildren(...users.map(u => {
+    const li = el('li'), del = el('button', '✕', 'icon');
+    li.append(el('span', u.email), el('span', u.admin ? 'admin' : u.datasources ? u.datasources.join(', ') || 'no access' : 'all datasources', 'badge'));
+    if (u.email !== me.email) {
+      del.title = del.ariaLabel = `Delete ${u.email}`;
+      del.onclick = async () => { await api(`/api/users/${encodeURIComponent(u.email)}`, { method: 'DELETE' }); loadUsers(); };
+      li.append(del);
+    }
+    li.onclick = e => { if (e.target !== del) { $('u-email').value = u.email; $('u-admin').checked = u.admin; $('u-all').checked = !u.datasources;
+      document.querySelectorAll('#u-sources input').forEach(c => c.checked = !!u.datasources?.includes(c.value)); syncUserForm(); } };
+    return li;
+  }));
+  $('u-sources').replaceChildren(...sources.map(s => {
+    const l = el('label', null, 'check'), c = el('input'); c.type = 'checkbox'; c.value = s.name;
+    l.append(c, ` ${s.name} (${s.type})`); return l;
+  }));
+  syncUserForm();
+}
+function syncUserForm() {
+  $('u-all').disabled = $('u-admin').checked;
+  $('u-sources').hidden = $('u-admin').checked || $('u-all').checked;
+}
+$('u-admin').onchange = $('u-all').onchange = syncUserForm;
+$('openusers').onclick = () => { $('userform').reset(); $('usermsg').textContent = ''; loadUsers(); $('usersmodal').showModal(); };
+$('userform').onsubmit = async e => {
+  e.preventDefault();
+  const all = $('u-admin').checked || $('u-all').checked;
+  const datasources = all ? null : [...document.querySelectorAll('#u-sources input:checked')].map(c => c.value);
+  try {
+    await api('/api/users', { method: 'POST', body: JSON.stringify({ email: $('u-email').value, password: $('u-password').value, admin: $('u-admin').checked, datasources }) });
+    $('userform').reset(); $('usermsg').className = ''; $('usermsg').textContent = 'Saved.'; loadUsers();
+  } catch (err) { $('usermsg').className = 'err'; $('usermsg').textContent = err.message; }
+};
 
 const PAGE = 10;
 let page = 0;
@@ -338,12 +560,22 @@ $('add').onsubmit = async e => {
 };
 
 let current = null;
-async function run() {
+async function run(explain = false) {
   if (current) return;
   current = crypto.randomUUID(); const t0 = performance.now();
-  $('run').disabled = true; $('cancel').disabled = false; $('status').textContent = 'Running…';
+  $('run').disabled = $('explain').disabled = true; $('cancel').disabled = false; $('status').textContent = explain ? 'Planning…' : 'Running…';
   try {
-    const r = await api('/api/query', { method: 'POST', body: JSON.stringify({ id: current, sql: editor.getValue() }) });
+    const sql = explain ? 'EXPLAIN ' + editor.getValue().trim().replace(/;$/, '') : editor.getValue();
+    const r = await api('/api/query', { method: 'POST', body: JSON.stringify({ id: current, sql }) });
+    if (explain) {
+      $('result').replaceChildren(el('pre', r.rows.map(row => row[1]).join('\n'), 'plan'));
+      $('status').textContent = 'Query plan';
+    } else showResult(r, t0);
+  } catch (err) { $('status').textContent = ''; $('result').replaceChildren(el('div', err.message, 'err')); }
+  current = null; $('run').disabled = $('explain').disabled = false; $('cancel').disabled = true; loadHistory(0);
+}
+
+function showResult(r, t0) {
     const table = el('table'), head = el('tr');
     head.append(...r.columns.map(c => el('th', c)));
     table.append(head, ...r.rows.map(row => {
@@ -353,10 +585,9 @@ async function run() {
     }));
     $('result').replaceChildren(r.columns.length ? table : el('div', 'Statement executed.', 'placeholder'));
     $('status').textContent = `${r.rows.length.toLocaleString()}${r.truncated ? '+' : ''} rows · ${((performance.now() - t0) / 1000).toFixed(2)}s`;
-  } catch (err) { $('status').textContent = ''; $('result').replaceChildren(el('div', err.message, 'err')); }
-  current = null; $('run').disabled = false; $('cancel').disabled = true; loadHistory(0);
 }
-$('run').onclick = run;
+$('run').onclick = () => run();
+$('explain').onclick = () => run(true);
 $('cancel').onclick = () => current && api(`/api/query/${current}/cancel`, { method: 'POST' });
 // DuckDB SQL = Postgres keywords + DuckDB extras, so WITH/FILTER/QUALIFY etc. all highlight.
 const pg = CodeMirror.resolveMode('text/x-pgsql');
@@ -373,10 +604,17 @@ function formatSql() {
 }
 const editor = CodeMirror.fromTextArea($('sql'), {
   mode: 'text/x-duckdb', lineNumbers: true, indentUnit: 4, smartIndent: true, matchBrackets: true, styleActiveLine: true,
-  extraKeys: { 'Ctrl-Enter': run, 'Cmd-Enter': run, 'Shift-Alt-F': formatSql },
+  extraKeys: { 'Ctrl-Enter': () => run(), 'Cmd-Enter': () => run(), 'Shift-Alt-F': formatSql, 'Ctrl-Space': 'autocomplete' },
+});
+const KEYWORDS = new Set(Object.keys(CodeMirror.resolveMode('text/x-duckdb').keywords).filter(k => k.length > 2));
+const NOT_ALIAS = new Set('on using where join left right inner outer full cross natural positional asof semi anti group order limit offset having qualify window union except intersect'.split(' '));
+editor.setOption('hintOptions', { hint: sqlHints, completeSingle: false });
+editor.on('inputRead', (cm, change) => {
+  const type = cm.getTokenAt(cm.getCursor()).type || '';
+  if (/^[\w.]$/.test(change.text[0]) && !/string|comment/.test(type) && !cm.state.completionActive) cm.showHint();
 });
 $('format').onclick = formatSql;
-refresh();
+refresh().catch(() => {});
 </script>
 </body>
 </html>
