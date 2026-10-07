@@ -162,7 +162,6 @@ def mongo(db, n, c, test=False):
     if test:  # listing collections already proved host, credentials and auth mechanism
         return []
     db.execute(f"ATTACH ':memory:' AS {ident(n)}")
-
     for dbname, coll in colls:
         pipeline = json.dumps([{"$sample": {"size": MONGO_SCHEMA_SAMPLE}}, {"$project": {"_id": 0, "doc": "$$ROOT"}}])
         docs = db.execute(f"SELECT doc FROM mongo_scan({lit(n)}, ?, ?, pipeline = ?, columns = {{'doc': 'VARCHAR'}})",
