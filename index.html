@@ -127,6 +127,12 @@
   .dot.bad { background: var(--danger); }
   h2 { display: flex; align-items: center; } h2 .icon { margin-left: auto; font-size: 13px; }
   h2 .icon:hover { color: var(--text); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .loading { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; padding: 4px 8px; }
+  .spin { width: 14px; height: 14px; flex: none; border: 2px solid var(--border); border-top-color: var(--accent);
+          border-radius: 50%; animation: spin .8s linear infinite; }
+  #refreshcat.spinning { animation: spin .8s linear infinite; color: var(--accent); }
+  @media (prefers-reduced-motion: reduce) { .spin, #refreshcat.spinning { animation-duration: 2.4s; } }
   .saved li { display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; }
   .saved li:hover { background: var(--hover); } .saved li span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .toolbar .sep { width: 1px; align-self: stretch; background: var(--border); margin: 0 2px; }
@@ -385,7 +391,14 @@ async function refresh() {
   }) : [el('li', me.admin ? 'No datasources yet.' : 'No datasources shared with you yet.', 'empty')]));
   loadSaved();
   const tables = {};
-  for (const c of await api('/api/catalog')) (tables[`${c.database}.${c.schema}.${c.table}`] ??= []).push(c);
+  // Building the catalog can take seconds (sources re-attached, Mongo collections analysed), so show it is working.
+  $('catalog').replaceChildren(spinner(catalogBusy || 'Loading catalog…'));
+  $('catalog').ariaBusy = 'true';
+  let rows;
+  try { rows = await api('/api/catalog'); }
+  catch (err) { $('catalog').replaceChildren(el('div', err.message, 'err')); return; }
+  finally { $('catalog').ariaBusy = 'false'; }
+  for (const c of rows) (tables[`${c.database}.${c.schema}.${c.table}`] ??= []).push(c);
   const entries = Object.entries(tables);
   $('catalog').replaceChildren(...(entries.length ? entries.map(([t, cols]) => {
     const d = el('details'), s = el('summary', t);
@@ -481,7 +494,14 @@ $('saveform').onsubmit = async e => {
   } catch (err) { $('savemsg').className = 'err'; $('savemsg').textContent = err.message; }
 };
 
-$('refreshcat').onclick = async () => { await api('/api/catalog/refresh', { method: 'POST' }); refresh(); };
+let catalogBusy = null;
+const spinner = text => { const d = el('div', null, 'loading'); d.append(el('span', null, 'spin'), text); return d; };
+$('refreshcat').onclick = async () => {
+  catalogBusy = 'Refreshing catalog… re-reading every source';
+  $('refreshcat').disabled = true; $('refreshcat').classList.add('spinning');
+  try { await api('/api/catalog/refresh', { method: 'POST' }); await refresh(); }
+  finally { catalogBusy = null; $('refreshcat').disabled = false; $('refreshcat').classList.remove('spinning'); }
+};
 
 async function exportResult(format) {
   $('status').textContent = `Exporting ${format.toUpperCase()}…`;
