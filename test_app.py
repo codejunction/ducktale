@@ -28,6 +28,15 @@ assert add("broken", f"{tmp}/nope/x.parquet").status_code == 400  # failed test 
 assert [d["name"] for d in admin.get("/api/datasources").json()] == ["crm", "erp"]
 assert add("crm", f"{tmp}/crm/customers.csv").status_code == 409  # adding never silently overwrites
 
+# The catalog is built in the background: 202 while building, then the tables.
+import time  # noqa: E402
+for _ in range(100):
+    cat = admin.get("/api/catalog")
+    if cat.status_code != 202:
+        break
+    time.sleep(0.05)
+assert cat.status_code == 200 and {(c["schema"], c["table"]) for c in cat.json()} == {("crm", "t"), ("erp", "t")}, cat.text
+
 # Editing: secrets come back masked; sending the mask back keeps the stored value.
 from app import MASK, mask, unmask  # noqa: E402
 stored = {"password": "s3cret", "uri": "mongodb://u:p%40ss@h:1/", "secret": {"SECRET": "k", "REGION": "eu"}}

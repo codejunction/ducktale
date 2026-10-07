@@ -384,6 +384,13 @@ async function refresh() {
   me = await api('/api/me');
   $('who').textContent = me.email + (me.admin ? ' · admin' : '');
   $('openusers').hidden = $('openadd').hidden = !me.admin;
+  await loadSources();
+  loadSaved();
+  loadHistory(0);
+  loadCatalog();
+}
+
+async function loadSources() {
   const sources = await api('/api/datasources');
   $('sources').replaceChildren(...(sources.length ? sources.map(s => {
     const li = el('li', null, 'source'), dot = el('span', null, s.error ? 'dot bad' : 'dot');
@@ -401,15 +408,23 @@ async function refresh() {
     }
     return li;
   }) : [el('li', me.admin ? 'No datasources yet.' : 'No datasources shared with you yet.', 'empty')]));
-  loadSaved();
-  const tables = {};
-  // Building the catalog can take seconds (sources re-attached, Mongo collections analysed), so show it is working.
-  $('catalog').replaceChildren(spinner(catalogBusy || 'Loading catalog…'));
+}
+
+// The server catalogs in the background (attaching sources, analysing Mongo collections) and answers
+// {building: true} until done, so poll and keep the spinner up meanwhile.
+let catalogTimer = null;
+async function loadCatalog() {
+  clearTimeout(catalogTimer);
   $('catalog').ariaBusy = 'true';
+  const text = catalogBusy || 'Building catalog… attaching sources and analysing collections';
+  if ($('catalog').firstChild?.className !== 'loading') $('catalog').replaceChildren(spinner(text));
   let rows;
   try { rows = await api('/api/catalog'); }
-  catch (err) { $('catalog').replaceChildren(el('div', err.message, 'err')); return; }
-  finally { $('catalog').ariaBusy = 'false'; }
+  catch (err) { catalogDone(); $('catalog').replaceChildren(el('div', err.message, 'err')); return; }
+  if (rows.building) { catalogTimer = setTimeout(loadCatalog, 1500); return; }
+  catalogDone();
+  loadSources();  // health dots reflect the sources just attached
+  const tables = {};
   for (const c of rows) (tables[`${c.database}.${c.schema}.${c.table}`] ??= []).push(c);
   const entries = Object.entries(tables);
   $('catalog').replaceChildren(...(entries.length ? entries.map(([t, cols]) => {
@@ -427,7 +442,10 @@ async function refresh() {
     for (const k of path.slice(0, -1)) node = node[k] ??= {};
     node[tb] = cols; FULL_NAMES.push(path.join('.'));
   }
-  loadHistory(0);
+}
+function catalogDone() {
+  $('catalog').ariaBusy = 'false';
+  catalogBusy = null; $('refreshcat').disabled = false; $('refreshcat').classList.remove('spinning');
 }
 
 let TREE = {}, FULL_NAMES = [];
@@ -511,8 +529,9 @@ const spinner = text => { const d = el('div', null, 'loading'); d.append(el('spa
 $('refreshcat').onclick = async () => {
   catalogBusy = 'Refreshing catalog… re-reading every source';
   $('refreshcat').disabled = true; $('refreshcat').classList.add('spinning');
-  try { await api('/api/catalog/refresh', { method: 'POST' }); await refresh(); }
-  finally { catalogBusy = null; $('refreshcat').disabled = false; $('refreshcat').classList.remove('spinning'); }
+  $('catalog').replaceChildren(spinner(catalogBusy));
+  try { await api('/api/catalog/refresh', { method: 'POST' }); loadCatalog(); }
+  catch (err) { catalogDone(); $('catalog').replaceChildren(el('div', err.message, 'err')); }
 };
 
 async function exportResult(format) {

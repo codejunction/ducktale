@@ -83,11 +83,12 @@ def secret(name, params):
     return f"CREATE SECRET {ident(name)} ({', '.join(f'{k} {value(v)}' for k, v in params.items())})"
 
 
-# Connector: (duckdb, name, config) -> directories the sandbox may still read. It attaches its source(s).
+# Connector: (duckdb, name, config, test) -> directories the sandbox may still read. It attaches its source(s);
+# test=True only proves the connection and credentials work (fast), skipping slow cataloging work.
 # New source type = one function here; the query path never looks at types.
 def statements(fn):
     """Adapt a connector that is a fixed list of SQL to the (db, name, config) -> dirs protocol."""
-    def connect(db, n, c):
+    def connect(db, n, c, test=False):
         stmts, dirs = fn(n, c)
         for s in stmts:
             db.execute(s)
@@ -95,13 +96,19 @@ def statements(fn):
     return connect
 
 
-def postgres(db, n, c):
+def postgres(db, n, c, test=False):
     """database: one name -> catalog <n>; "a, b" or "*" (every database on the server) -> catalogs <n>_<db>."""
     wanted = [d.strip() for d in str(c.get("database") or "*").split(",") if d.strip()]
     db.execute("INSTALL postgres")
     db.execute("LOAD postgres")
     db.execute(secret(n, {"TYPE": "postgres", "HOST": c["host"], "PORT": c.get("port", 5432),
                           "DATABASE": "postgres" if "*" in wanted else wanted[0], "USER": c["user"], "PASSWORD": c["password"]}))
+    if test:  # credentials and reachability only; database discovery and attaching happen while cataloging
+        probe = ident(n + "__probe")
+        db.execute(f"ATTACH '' AS {probe} (TYPE postgres, SECRET {ident(n)}, READ_ONLY)")
+        db.execute(f"SELECT * FROM postgres_query({lit(n + '__probe')}, 'SELECT 1')").fetchall()
+        db.execute(f"DETACH {probe}")
+        return []
     if "*" in wanted:
         probe = ident(n + "__probe")
         db.execute(f"ATTACH '' AS {probe} (TYPE postgres, SECRET {ident(n)}, READ_ONLY)")
@@ -122,7 +129,7 @@ def sqlserver(n, c):  # credentials go through a secret: a DSN in ATTACH would s
             f"ATTACH '' AS {ident(n)} (TYPE mssql, SECRET {ident(n)}, READ_ONLY)"], []
 
 
-def mongo(db, n, c):
+def mongo(db, n, c, test=False):
     """Every database becomes a schema and every collection a view, typed by analysing a random sample of documents
     (sample_size, default 10,000) instead of the extension's first-documents guess. Nested documents become STRUCTs,
     arrays LISTs, int+double DOUBLE. Views read through a secret, so the URI (with password) never reaches user SQL."""
@@ -149,6 +156,8 @@ def mongo(db, n, c):
     colls = db.execute("SELECT DISTINCT schema_name, table_name FROM duckdb_columns() WHERE database_name = ?",
                        [n + "__discover"]).fetchall()
     db.execute(f"DETACH {probe}")
+    if test:  # listing collections already proved host, credentials and auth mechanism
+        return []
     db.execute(f"ATTACH ':memory:' AS {ident(n)}")
     sample = int(c.get("sample_size", 10_000))
     for dbname, coll in colls:
@@ -221,8 +230,7 @@ def iceberg(n, c):  # IOMETE and any Iceberg REST catalog; namespaces -> schemas
             f"ATTACH {lit(w)} AS {ident(alias(w))} (TYPE iceberg, ENDPOINT {lit(c['endpoint'])}, SECRET {ident(n)})" for w in whs], []
 
 
-@statements
-def files(n, c):  # S3(-compatible) or local Parquet/CSV/JSON: {"tables": {"orders": "s3://b/orders/*.parquet"}, "secret": {...}}
+def files(db, n, c, test=False):  # S3(-compatible) or local Parquet/CSV/JSON: {"tables": {"orders": "s3://b/orders/*.parquet"}, "secret": {...}}
     s = dict(c.get("secret") or {})
     if "://" in s.get("ENDPOINT", ""):  # MinIO/R2/Ceph style "http://host:9000" -> host + SSL flag + path-style URLs
         scheme, s["ENDPOINT"] = s["ENDPOINT"].rstrip("/").split("://", 1)
@@ -230,10 +238,17 @@ def files(n, c):  # S3(-compatible) or local Parquet/CSV/JSON: {"tables": {"orde
         s.setdefault("URL_STYLE", "path")
     bucket = c.get("bucket", "").strip("/")
     tables = {t: f"s3://{bucket}/{p.lstrip('/')}" if bucket and "://" not in p else p for t, p in c["tables"].items()}
-    stmts = ["INSTALL httpfs", "LOAD httpfs"] + ([secret(n, s)] if s else [])
-    stmts.append(f"CREATE SCHEMA {ident(n)}")
-    stmts += [f"CREATE VIEW {ident(n)}.{ident(t)} AS FROM {lit(p)}" for t, p in tables.items()]
-    return stmts, [p[:p.replace("\\", "/").rfind("/") + 1] for p in tables.values()]
+    for stmt in ["INSTALL httpfs", "LOAD httpfs"] + ([secret(n, s)] if s else []):
+        db.execute(stmt)
+    if test:  # listing proves bucket, endpoint and keys; reading file schemas (views) happens while cataloging
+        for t, path in tables.items():
+            if not db.execute("SELECT count(*) FROM glob(?)", [path]).fetchone()[0]:
+                raise ValueError(f"table {t}: no files match {path}")
+        return []
+    db.execute(f"CREATE SCHEMA {ident(n)}")
+    for t, path in tables.items():
+        db.execute(f"CREATE VIEW {ident(n)}.{ident(t)} AS FROM {lit(path)}")
+    return [path[:path.replace("\\", "/").rfind("/") + 1] for path in tables.values()]
 
 
 CONNECTORS = {"postgres": postgres, "sqlserver": sqlserver, "mongo": mongo, "iceberg": iceberg, "s3": files, "files": files}
@@ -243,6 +258,10 @@ CONNECTORS = {"postgres": postgres, "sqlserver": sqlserver, "mongo": mongo, "ice
 # ponytail: one engine per access set; temp tables are shared by users with the same set. Per-user sessions when needed.
 ENGINES, CATALOG, HEALTH = {}, {}, {}
 BUILD_LOCK = threading.Lock()
+# Cataloging (attaching every source, analysing Mongo collections) runs in a background thread per access set;
+# /api/catalog answers 202 until it is done. GEN guards against storing a catalog that a later change invalidated.
+JOBS, CATALOG_ERRORS, GEN = {}, {}, [0]
+JOBS_LOCK = threading.Lock()
 RUNNING = {}
 FILE_WRITES = {duckdb.StatementType.COPY, duckdb.StatementType.COPY_DATABASE, duckdb.StatementType.EXPORT}
 # Extension functions that take their own connection string or run raw remote SQL would bypass the registered,
@@ -252,12 +271,12 @@ FILE_WRITES = {duckdb.StatementType.COPY, duckdb.StatementType.COPY_DATABASE, du
 BLOCKED_FUNCTIONS = re.compile(r"\b(mongo_\w+|postgres_\w+|mssql_\w+|mysql_\w+|sqlite_\w+|duckdb_databases|database_list)\b", re.I)
 
 
-def build(sources, strict=False):
+def build(sources, strict=False, test=False):
     db = duckdb.connect(config={"memory_limit": MEMORY_LIMIT})
     allowed = []
     for name, typ, config in sources:
         try:
-            allowed += CONNECTORS[typ](db, name, config)
+            allowed += CONNECTORS[typ](db, name, config, test)
             HEALTH[name] = None
         except (duckdb.Error, KeyError, ValueError) as e:
             msg = f"{type(e).__name__}: {e}"
@@ -281,18 +300,45 @@ def allowed_names(user):
     return names if user["admin"] or user["datasources"] is None else [n for n in names if n in user["datasources"]]
 
 
-def engine(user):
-    key = frozenset(allowed_names(user))
+def engine_for(key):
+    # ponytail: one global build lock; queries wait while any access set is (re)cataloging. Per-key locks if that hurts.
     with BUILD_LOCK:
         if key not in ENGINES:
             ENGINES[key] = build([s for s in stored() if s[0] in key])
-        return key, ENGINES[key]
+        return ENGINES[key]
+
+
+def engine(user):
+    key = frozenset(allowed_names(user))
+    return key, engine_for(key)
 
 
 def invalidate():
     with BUILD_LOCK:
+        GEN[0] += 1
         ENGINES.clear()
         CATALOG.clear()
+        CATALOG_ERRORS.clear()
+
+
+def catalog_job(key):
+    gen = GEN[0]
+    try:
+        rows = engine_for(key).cursor().execute(
+            "SELECT database_name, schema_name, table_name, column_name, data_type FROM duckdb_columns()"
+            " WHERE NOT internal AND database_name NOT IN ('system', 'temp') ORDER BY ALL").fetchall()
+        if gen == GEN[0]:
+            CATALOG[key] = [dict(zip(("database", "schema", "table", "column", "type"), r)) for r in rows]
+    except Exception as e:  # surfaced by /api/catalog; never kills the server
+        if gen == GEN[0]:
+            CATALOG_ERRORS[key] = f"{type(e).__name__}: {e}"
+
+
+def start_cataloging(key):
+    with JOBS_LOCK:
+        if not (key in JOBS and JOBS[key].is_alive()):
+            JOBS[key] = threading.Thread(target=catalog_job, args=(key,), daemon=True)
+            JOBS[key].start()
 
 
 # --- Auth: email/password, PBKDF2 hashes, opaque session cookie (stored hashed).
@@ -458,9 +504,10 @@ def add_datasource(d: Datasource, _=Depends(admin_user)):
     if old and not d.replace:
         raise HTTPException(409, f"datasource {d.name} already exists")
     config = unmask(d.config, unseal(old[0][0])) if old else d.config
-    build([(d.name, d.type, config)], strict=True).close()  # connection test; raises on failure
+    build([(d.name, d.type, config)], strict=True, test=True).close()  # quick connection test; raises on failure
     meta("INSERT OR REPLACE INTO datasources VALUES (?, ?, ?)", (d.name, d.type, seal(config)))
     invalidate()
+    start_cataloging(frozenset(r[0] for r in meta("SELECT name FROM datasources")))  # admins' view, in the background
     return {"ok": True}
 
 
@@ -481,19 +528,23 @@ def delete_datasource(name: str, _=Depends(admin_user)):
 
 
 @app.get("/api/catalog")
-def catalog(user=Depends(current_user)):
-    key, db = engine(user)
-    if key not in CATALOG:  # cached until a datasource changes or someone hits refresh
-        rows = db.cursor().execute(
-            "SELECT database_name, schema_name, table_name, column_name, data_type FROM duckdb_columns()"
-            " WHERE NOT internal AND database_name NOT IN ('system', 'temp') ORDER BY ALL").fetchall()
-        CATALOG[key] = [dict(zip(("database", "schema", "table", "column", "type"), r)) for r in rows]
-    return CATALOG[key]
+def catalog(response: Response, user=Depends(current_user)):
+    """The catalog, cached until a datasource changes or someone refreshes. 202 {"building": true} while it is
+    being built in the background: poll again."""
+    key = frozenset(allowed_names(user))
+    if key in CATALOG:
+        return CATALOG[key]
+    if key in CATALOG_ERRORS:
+        raise HTTPException(500, CATALOG_ERRORS.pop(key))  # popped so the next poll retries
+    start_cataloging(key)
+    response.status_code = 202
+    return {"building": True}
 
 
 @app.post("/api/catalog/refresh")
-def refresh_catalog(_=Depends(current_user)):
-    invalidate()  # next query re-attaches every source, picking up new tables/columns
+def refresh_catalog(user=Depends(current_user)):
+    invalidate()  # re-attach every source, picking up new databases, tables, collections and fields
+    start_cataloging(frozenset(allowed_names(user)))
     return {"ok": True}
 
 
