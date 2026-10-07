@@ -133,9 +133,11 @@ MONGO_SCHEMA_SAMPLE = 10_000  # random documents per collection; covers small co
 
 
 def mongo(db, n, c, test=False):
-    """Every database becomes a schema and every collection a view, typed by analysing a random sample of documents
-    instead of the extension's first-documents guess (which misses late fields). Nested documents become STRUCTs,
-    arrays LISTs, int+double DOUBLE. Views read through a secret, so the URI (with password) never reaches user SQL."""
+    """Every database becomes a schema and every collection a view. A collection's `_id: "__schema"` document (Atlas SQL
+    style) wins; otherwise the schema comes from analysing a random sample of documents instead of the extension's
+    first-100-documents guess (which misses late fields). Nested documents become STRUCTs, arrays LISTs, int+double
+    DOUBLE. Views read through a secret, so the URI (with password) never reaches user SQL.
+    Extension docs: https://github.com/stephaniewang526/duckdb-mongo"""
     u = urlsplit(c["uri"])
     if "," in u.netloc:
         raise ValueError("multi-host URIs are not supported yet; use mongodb+srv:// or a single host")
@@ -143,14 +145,18 @@ def mongo(db, n, c, test=False):
     opts = {k.lower(): v[-1] for k, v in query.items()}
     # MongoDB rule: no authSource -> the database in the URI path (mongodb://u:p@host/shop), else admin.
     auth_source = opts.get("authsource") or unquote(u.path.strip("/")) or "admin"
-    # The secret has no slot for authMechanism, replicaSet, readPreference, tlsCAFile, ... but the extension appends
-    # AUTHSOURCE to the URI verbatim, so the remaining options ride along after it ($external + PLAIN for LDAP etc.).
-    # ponytail: relies on the extension's string concatenation; use a real OPTIONS secret field if it ever gets one.
-    rest = urlencode([(k, x) for k, v in query.items() if k.lower() not in ("authsource", "tls", "ssl") for x in v], safe="$")
+    # Secret fields (src/mongo_secrets.cpp): host, port, user, password, database, authsource, srv, tls/ssl,
+    # tls_ca_file, tls_allow_invalid_certificates. There is none for authMechanism, replicaSet, readPreference, ...;
+    # BuildMongoConnectionString appends "authSource=" + AUTHSOURCE verbatim, so those ride along after it
+    # ($external + PLAIN for LDAP etc.). ponytail: relies on that concatenation; use an OPTIONS field if one appears.
+    mapped = {"authsource", "tls", "ssl", "tlscafile", "tlsallowinvalidcertificates"}
+    rest = urlencode([(k, x) for k, v in query.items() if k.lower() not in mapped for x in v], safe="$")
     params = {"TYPE": "mongo", "HOST": u.hostname, "PORT": u.port or 27017, "SRV": u.scheme == "mongodb+srv",
               "USER": unquote(u.username or ""), "PASSWORD": unquote(u.password or ""),
               "AUTHSOURCE": auth_source + (f"&{rest}" if rest else ""),
-              "TLS": opts.get("tls", opts.get("ssl", "")).lower() == "true"}
+              "TLS": opts.get("tls", opts.get("ssl", "")).lower() == "true",
+              "TLS_CA_FILE": opts.get("tlscafile", ""),
+              "TLS_ALLOW_INVALID_CERTIFICATES": opts.get("tlsallowinvalidcertificates", "").lower() == "true"}
     for s in ("INSTALL mongo FROM community", "LOAD mongo",
               secret(n, {k: v for k, v in params.items() if v not in ("", None)})):
         db.execute(s)
@@ -163,14 +169,19 @@ def mongo(db, n, c, test=False):
         return []
     db.execute(f"ATTACH ':memory:' AS {ident(n)}")
     for dbname, coll in colls:
-        pipeline = json.dumps([{"$sample": {"size": MONGO_SCHEMA_SAMPLE}}, {"$project": {"_id": 0, "doc": "$$ROOT"}}])
-        docs = db.execute(f"SELECT doc FROM mongo_scan({lit(n)}, ?, ?, pipeline = ?, columns = {{'doc': 'VARCHAR'}})",
-                          [dbname, coll, pipeline]).fetchall()
-        schema = merge_types([infer_type(json.loads(d)) for (d,) in docs if d]) or {"_id": "VARCHAR"}
-        columns = "{" + ", ".join(f"{lit(k)}: {lit(render_type(t))}" for k, t in schema.items()) + "}"
         db.execute(f"CREATE SCHEMA IF NOT EXISTS {ident(n)}.{ident(dbname)}")
+        has_schema_doc = db.execute(f"SELECT count(*) FROM mongo_scan({lit(n)}, ?, ?, filter = ?, columns = {{'_id': 'VARCHAR'}})",
+                                    [dbname, coll, '{"_id": "__schema"}']).fetchone()[0]
+        columns = ""
+        if not has_schema_doc:  # without columns the extension reads the __schema document itself
+            pipeline = json.dumps([{"$sample": {"size": MONGO_SCHEMA_SAMPLE}}, {"$project": {"_id": 0, "doc": "$$ROOT"}}])
+            docs = db.execute(f"SELECT doc FROM mongo_scan({lit(n)}, ?, ?, pipeline = ?, columns = {{'doc': 'VARCHAR'}})",
+                              [dbname, coll, pipeline]).fetchall()
+            schema = merge_types([infer_type(json.loads(d)) for (d,) in docs if d]) or {"_id": "VARCHAR"}
+            columns = ", columns = {" + ", ".join(f"{lit(k)}: {lit(render_type(t))}" for k, t in schema.items()) + "}"
+        hide = " WHERE _id IS DISTINCT FROM '__schema'" if has_schema_doc else ""  # the extension returns it as a row
         db.execute(f"CREATE VIEW {ident(n)}.{ident(dbname)}.{ident(coll)} AS "
-                   f"SELECT * FROM mongo_scan({lit(n)}, {lit(dbname)}, {lit(coll)}, columns = {columns})")
+                   f"SELECT * FROM mongo_scan({lit(n)}, {lit(dbname)}, {lit(coll)}{columns}){hide}")
     return []
 
 
