@@ -132,7 +132,9 @@ def mongo(db, n, c):
     opts = {k.lower(): v[-1] for k, v in parse_qs(u.query).items()}
     params = {"TYPE": "mongo", "HOST": u.hostname, "PORT": u.port or 27017, "SRV": u.scheme == "mongodb+srv",
               "USER": unquote(u.username or ""), "PASSWORD": unquote(u.password or ""),
-              "AUTHSOURCE": opts.get("authsource", ""), "TLS": opts.get("tls", opts.get("ssl", "")).lower() == "true"}
+              # MongoDB rule: no authSource -> the database in the URI path (mongodb://u:p@host/shop). Dropping it made
+              # the driver look the user up in "admin", fail mechanism negotiation and fall back to SCRAM-SHA-1.
+              "AUTHSOURCE": opts.get("authsource") or unquote(u.path.strip("/")), "TLS": opts.get("tls", opts.get("ssl", "")).lower() == "true"}
     for s in ("INSTALL mongo FROM community", "LOAD mongo",
               secret(n, {k: v for k, v in params.items() if v not in ("", None)})):
         db.execute(s)
