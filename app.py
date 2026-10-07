@@ -11,7 +11,7 @@ import sqlite3
 import threading
 from contextlib import closing
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 import duckdb
 from cryptography.fernet import Fernet
@@ -129,12 +129,18 @@ def mongo(db, n, c):
     u = urlsplit(c["uri"])
     if "," in u.netloc:
         raise ValueError("multi-host URIs are not supported yet; use mongodb+srv:// or a single host")
-    opts = {k.lower(): v[-1] for k, v in parse_qs(u.query).items()}
+    query = parse_qs(u.query)
+    opts = {k.lower(): v[-1] for k, v in query.items()}
+    # MongoDB rule: no authSource -> the database in the URI path (mongodb://u:p@host/shop), else admin.
+    auth_source = opts.get("authsource") or unquote(u.path.strip("/")) or "admin"
+    # The secret has no slot for authMechanism, replicaSet, readPreference, tlsCAFile, ... but the extension appends
+    # AUTHSOURCE to the URI verbatim, so the remaining options ride along after it ($external + PLAIN for LDAP etc.).
+    # ponytail: relies on the extension's string concatenation; use a real OPTIONS secret field if it ever gets one.
+    rest = urlencode([(k, x) for k, v in query.items() if k.lower() not in ("authsource", "tls", "ssl") for x in v], safe="$")
     params = {"TYPE": "mongo", "HOST": u.hostname, "PORT": u.port or 27017, "SRV": u.scheme == "mongodb+srv",
               "USER": unquote(u.username or ""), "PASSWORD": unquote(u.password or ""),
-              # MongoDB rule: no authSource -> the database in the URI path (mongodb://u:p@host/shop). Dropping it made
-              # the driver look the user up in "admin", fail mechanism negotiation and fall back to SCRAM-SHA-1.
-              "AUTHSOURCE": opts.get("authsource") or unquote(u.path.strip("/")), "TLS": opts.get("tls", opts.get("ssl", "")).lower() == "true"}
+              "AUTHSOURCE": auth_source + (f"&{rest}" if rest else ""),
+              "TLS": opts.get("tls", opts.get("ssl", "")).lower() == "true"}
     for s in ("INSTALL mongo FROM community", "LOAD mongo",
               secret(n, {k: v for k, v in params.items() if v not in ("", None)})):
         db.execute(s)
