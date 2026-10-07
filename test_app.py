@@ -26,6 +26,17 @@ assert add("crm", f"{tmp}/crm/customers.csv").status_code == 200
 assert add("erp", f"{tmp}/erp/orders.parquet").status_code == 200
 assert add("broken", f"{tmp}/nope/x.parquet").status_code == 400  # failed test is not saved
 assert [d["name"] for d in admin.get("/api/datasources").json()] == ["crm", "erp"]
+assert add("crm", f"{tmp}/crm/customers.csv").status_code == 409  # adding never silently overwrites
+
+# Editing: secrets come back masked; sending the mask back keeps the stored value.
+from app import MASK, mask, unmask  # noqa: E402
+stored = {"password": "s3cret", "uri": "mongodb://u:p%40ss@h:1/", "secret": {"SECRET": "k", "REGION": "eu"}}
+shown = mask(stored)
+assert shown == {"password": MASK, "uri": f"mongodb://u:{MASK}@h:1/", "secret": {"SECRET": MASK, "REGION": "eu"}}, shown
+assert unmask(shown, stored) == stored and unmask({**shown, "password": "new"}, stored)["password"] == "new"
+edit = admin.get("/api/datasources/crm").json()
+assert edit["type"] == "files" and edit["config"]["tables"]["t"].endswith("customers.csv")
+assert admin.post("/api/datasources", json={**edit, "replace": True}).status_code == 200
 raw = sqlite3.connect(f"{tmp}/meta.db").execute("SELECT config FROM datasources").fetchall()
 assert all(c.startswith("gAAAA") and tmp not in c for (c,) in raw), "configs must be encrypted at rest"
 

@@ -52,7 +52,7 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
   button.primary:hover:not(:disabled) { background: #f0b232; border-color: #f0b232; }
   button.icon { border: 0; background: none; color: var(--muted); padding: 2px 6px; }
-  button.icon:hover { color: var(--danger); }
+  button.icon:hover { color: var(--danger); } button.icon.edit:hover { color: var(--accent); }
   .source { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; }
   .source:hover { background: var(--hover); }
   .source .name { flex: 1; font-weight: 500; }
@@ -364,10 +364,18 @@ function setMode(json) {
 $('mode-form').onclick = () => setMode(false);
 $('mode-json').onclick = () => setMode(true);
 $('f-type').onchange = () => { renderFields(); if (jsonMode) $('f-config').value = JSON.stringify(formConfig(), null, 2); };
-$('openadd').onclick = () => {
-  $('add').reset(); setMode(false); renderFields(); $('addmsg').textContent = '';
-  $('addmodal').showModal(); $('f-name').focus();
-};
+let editing = null;  // datasource name while editing, null while adding
+function openDatasource(ds) {
+  editing = ds?.name ?? null;
+  $('add').reset(); setMode(false); $('addmsg').textContent = '';
+  $('addtitle').textContent = ds ? `Edit datasource ${ds.name}` : 'Add datasource';
+  $('f-name').readOnly = !!ds;  // renaming would orphan user grants and saved queries
+  if (ds) { $('f-name').value = ds.name; $('f-type').value = ds.type; }
+  renderFields(ds?.config);
+  $('addmsg').textContent = ds ? 'Secrets show as ******** — leave them to keep the stored value.' : '';
+  $('addmodal').showModal(); (ds ? $('f-type') : $('f-name')).focus();
+}
+$('openadd').onclick = () => openDatasource(null);
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => b.closest('dialog').close());
 document.querySelectorAll('dialog:not(#loginmodal)').forEach(d => d.onclick = e => { if (e.target === d) d.close(); });
 
@@ -382,6 +390,10 @@ async function refresh() {
     dot.title = s.error || 'Connected';
     li.append(dot, el('span', s.name, 'name'), el('span', s.type, 'badge'));
     if (me.admin) {
+      const edit = el('button', '✎', 'icon edit');
+      edit.title = edit.ariaLabel = `Edit ${s.name}`;
+      edit.onclick = async () => openDatasource(await api(`/api/datasources/${s.name}`));
+      li.append(edit);
       const del = el('button', '✕', 'icon');
       del.title = del.ariaLabel = `Delete ${s.name}`;
       del.onclick = async () => { if (confirm(`Delete datasource ${s.name}?`)) { await api(`/api/datasources/${s.name}`, { method: 'DELETE' }); refresh(); } };
@@ -577,7 +589,7 @@ $('add').onsubmit = async e => {
   catch (err) { msg.className = 'err'; msg.textContent = `Invalid JSON: ${err.message}`; return; }
   msg.className = ''; msg.textContent = 'Testing connection…'; $('savebtn').disabled = true;
   try {
-    await api('/api/datasources', { method: 'POST', body: JSON.stringify({ name: $('f-name').value, type: $('f-type').value, config }) });
+    await api('/api/datasources', { method: 'POST', body: JSON.stringify({ name: $('f-name').value, type: $('f-type').value, config, replace: !!editing }) });
     $('addmodal').close(); refresh();
   } catch (err) { msg.className = 'err'; msg.textContent = err.message; }
   $('savebtn').disabled = false;

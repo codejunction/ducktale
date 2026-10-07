@@ -334,6 +334,32 @@ class Datasource(BaseModel):
     name: str
     type: str
     config: dict
+    replace: bool = False  # True = edit an existing datasource; masked secrets keep their stored values
+
+
+# Secrets never go back to the browser: editing shows MASK, and a MASK sent back means "keep the stored value".
+MASK = "********"
+SENSITIVE = re.compile(r"password|secret|token", re.I)
+
+
+def mask(v, key=""):
+    if isinstance(v, dict):
+        return {k: mask(x, k) for k, x in v.items()}
+    if isinstance(v, str) and v and SENSITIVE.search(key):
+        return MASK
+    if isinstance(v, str) and (pw := urlsplit(v).password if "://" in v else None):  # URI with embedded password
+        return v.replace(f":{pw}@", f":{MASK}@", 1)
+    return v
+
+
+def unmask(new, old):
+    if new == MASK:
+        return old
+    if isinstance(new, dict) and isinstance(old, dict):
+        return {k: unmask(x, old.get(k)) for k, x in new.items()}
+    if isinstance(new, str) and f":{MASK}@" in new and isinstance(old, str) and "://" in old:
+        return new.replace(f":{MASK}@", f":{urlsplit(old).password}@", 1)
+    return new
 
 
 class Query(BaseModel):
@@ -420,10 +446,22 @@ def list_datasources(user=Depends(current_user)):
 def add_datasource(d: Datasource, _=Depends(admin_user)):
     if not d.name.isidentifier() or d.type not in CONNECTORS:
         raise HTTPException(400, f"name must be an identifier; type one of {list(CONNECTORS)}")
-    build([(d.name, d.type, d.config)], strict=True).close()  # connection test; raises on failure
-    meta("INSERT OR REPLACE INTO datasources VALUES (?, ?, ?)", (d.name, d.type, seal(d.config)))
+    old = meta("SELECT config FROM datasources WHERE name = ?", (d.name,))
+    if old and not d.replace:
+        raise HTTPException(409, f"datasource {d.name} already exists")
+    config = unmask(d.config, unseal(old[0][0])) if old else d.config
+    build([(d.name, d.type, config)], strict=True).close()  # connection test; raises on failure
+    meta("INSERT OR REPLACE INTO datasources VALUES (?, ?, ?)", (d.name, d.type, seal(config)))
     invalidate()
     return {"ok": True}
+
+
+@app.get("/api/datasources/{name}")
+def get_datasource(name: str, _=Depends(admin_user)):
+    row = meta("SELECT type, config FROM datasources WHERE name = ?", (name,))
+    if not row:
+        raise HTTPException(404, "no such datasource")
+    return {"name": name, "type": row[0][0], "config": mask(unseal(row[0][1]))}
 
 
 @app.delete("/api/datasources/{name}")
