@@ -281,8 +281,12 @@ const host = (port) => [
 const FIELDS = {
   postgres: host(5432),
   sqlserver: [...host(1433), { key: 'encrypt', label: 'Encrypt connection', kind: 'select', options: ['yes', 'no'] }],
-  mongo: [{ key: 'uri', label: 'Connection URI', kind: 'password', placeholder: 'mongodb://user:pass@host:27017', required: true,
-    hint: 'Every database on the server becomes a schema and every collection a table: name.database.collection.' }],
+  mongo: [
+    { key: 'uri', label: 'Connection URI', kind: 'password', placeholder: 'mongodb://user:pass@host:27017/?authSource=admin', required: true,
+      hint: 'Every database becomes a schema and every collection a table: name.database.collection.' },
+    { key: 'sample_size', label: 'Documents sampled per collection', kind: 'number', value: 10000,
+      hint: 'Random documents analysed to build each schema. Nested documents become STRUCTs (campaign.name), arrays LISTs.' },
+  ],
   iceberg: [
     { key: 'warehouse', label: 'Warehouse / catalog', required: true, placeholder: 'lakehouse',
       hint: 'Several catalogs separated by commas become name_catalog. Namespaces and tables are discovered automatically.' },

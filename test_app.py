@@ -33,7 +33,9 @@ q = lambda c, sql: c.post("/api/query", json={"id": "x", "sql": sql})
 r = q(admin, "SELECT name, amount FROM crm.t JOIN erp.t ON crm.t.id = erp.t.customer_id")
 assert r.json()["rows"] == [["Ann", 99.5]], r.text
 for bad in [f"FROM read_csv('{os.path.abspath(__file__)}')", "SET enable_external_access=true",
-            "INSTALL mysql", f"ATTACH '{tmp}/x.db' AS x", f"COPY (SELECT 1) TO '{tmp}/crm/out.csv'"]:
+            "INSTALL mysql", f"ATTACH '{tmp}/x.db' AS x", f"COPY (SELECT 1) TO '{tmp}/crm/out.csv'",
+            "FROM mongo_scan('mongodb://elsewhere', 'db', 'c')", "FROM postgres_scan('host=elsewhere', 'public', 't')",
+            'FROM "Postgres_Query"(\'crm\', \'select 1\')', "SELECT path FROM duckdb_databases()"]:
     assert q(admin, bad).status_code == 400, bad
 
 # Per-user datasource access is enforced by what is attached, not by the UI.
@@ -50,4 +52,13 @@ assert exp.text.replace("\r", "") == "id,name\n1,Ann\n2,Bob\n", exp.text
 assert admin.post("/api/saved", json={"name": "people", "sql": "FROM crm.t"}).status_code == 200
 assert [s["name"] for s in admin.get("/api/saved").json()] == ["people"] and analyst.get("/api/saved").json() == []
 assert admin.post("/api/logout").status_code == 200 and admin.get("/api/me").status_code == 401
+
+# Mongo schema analysis: late/sparse fields kept, int+double widened, nested docs -> STRUCT, arrays -> LIST.
+from app import infer_type, merge_types, render_type  # noqa: E402
+docs = [{"_id": {"$oid": "a"}, "n": 1, "geo": {"c": "IN"}, "tags": ["x"]},
+        {"_id": {"$oid": "b"}, "n": 2.5, "geo": {"c": "US", "ip": "1.2.3.4"}, "at": {"$date": 1}, "late": True, "v": None}]
+schema = merge_types([infer_type(d) for d in docs])
+assert {k: render_type(t) for k, t in schema.items()} == {
+    "_id": "VARCHAR", "n": "DOUBLE", "geo": 'STRUCT("c" VARCHAR, "ip" VARCHAR)', "tags": "VARCHAR[]",
+    "at": "TIMESTAMP", "late": "BOOLEAN", "v": "VARCHAR"}, schema
 print("ok")

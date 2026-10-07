@@ -5,11 +5,13 @@ import hmac
 import io
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import parse_qs, unquote, urlsplit
 
 import duckdb
 from cryptography.fernet import Fernet
@@ -113,17 +115,92 @@ def postgres(db, n, c):
 
 
 @statements
-def sqlserver(n, c):
-    dsn = (f"Server={c['host']},{c.get('port', 1433)};Database={c['database']};"
-           f"User Id={c['user']};Password={c['password']};Encrypt={c.get('encrypt', 'yes')}")
+def sqlserver(n, c):  # credentials go through a secret: a DSN in ATTACH would show up in duckdb_databases().path
     return ["INSTALL mssql FROM community", "LOAD mssql",
-            f"ATTACH {lit(dsn)} AS {ident(n)} (TYPE mssql, READ_ONLY)"], []
+            secret(n, {"TYPE": "mssql", "HOST": c["host"], "PORT": c.get("port", 1433), "DATABASE": c["database"],
+                       "USER": c["user"], "PASSWORD": c["password"]}),
+            f"ATTACH '' AS {ident(n)} (TYPE mssql, SECRET {ident(n)}, READ_ONLY)"], []
 
 
-@statements
-def mongo(n, c):
-    return ["INSTALL mongo FROM community", "LOAD mongo",
-            f"ATTACH {lit(c['uri'])} AS {ident(n)} (TYPE mongo, READ_ONLY)"], []
+def mongo(db, n, c):
+    """Every database becomes a schema and every collection a view, typed by analysing a random sample of documents
+    (sample_size, default 10,000) instead of the extension's first-documents guess. Nested documents become STRUCTs,
+    arrays LISTs, int+double DOUBLE. Views read through a secret, so the URI (with password) never reaches user SQL."""
+    u = urlsplit(c["uri"])
+    if "," in u.netloc:
+        raise ValueError("multi-host URIs are not supported yet; use mongodb+srv:// or a single host")
+    opts = {k.lower(): v[-1] for k, v in parse_qs(u.query).items()}
+    params = {"TYPE": "mongo", "HOST": u.hostname, "PORT": u.port or 27017, "SRV": u.scheme == "mongodb+srv",
+              "USER": unquote(u.username or ""), "PASSWORD": unquote(u.password or ""),
+              "AUTHSOURCE": opts.get("authsource", ""), "TLS": opts.get("tls", opts.get("ssl", "")).lower() == "true"}
+    for s in ("INSTALL mongo FROM community", "LOAD mongo",
+              secret(n, {k: v for k, v in params.items() if v not in ("", None)})):
+        db.execute(s)
+    probe = ident(n + "__discover")  # attached only to list databases/collections, then detached
+    db.execute(f"ATTACH '' AS {probe} (TYPE mongo, SECRET {ident(n)}, READ_ONLY)")
+    colls = db.execute("SELECT DISTINCT schema_name, table_name FROM duckdb_columns() WHERE database_name = ?",
+                       [n + "__discover"]).fetchall()
+    db.execute(f"DETACH {probe}")
+    db.execute(f"ATTACH ':memory:' AS {ident(n)}")
+    sample = int(c.get("sample_size", 10_000))
+    for dbname, coll in colls:
+        pipeline = json.dumps([{"$sample": {"size": sample}}, {"$project": {"_id": 0, "doc": "$$ROOT"}}])
+        docs = db.execute(f"SELECT doc FROM mongo_scan({lit(n)}, ?, ?, pipeline = ?, columns = {{'doc': 'VARCHAR'}})",
+                          [dbname, coll, pipeline]).fetchall()
+        schema = merge_types([infer_type(json.loads(d)) for (d,) in docs if d]) or {"_id": "VARCHAR"}
+        columns = "{" + ", ".join(f"{lit(k)}: {lit(render_type(t))}" for k, t in schema.items()) + "}"
+        db.execute(f"CREATE SCHEMA IF NOT EXISTS {ident(n)}.{ident(dbname)}")
+        db.execute(f"CREATE VIEW {ident(n)}.{ident(dbname)}.{ident(coll)} AS "
+                   f"SELECT * FROM mongo_scan({lit(n)}, {lit(dbname)}, {lit(coll)}, columns = {columns})")
+    return []
+
+
+# Mongo relaxed extended JSON -> type tree: "BIGINT" | {"field": type} (STRUCT) | [type] (LIST) | None (only nulls).
+def infer_type(v):
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return "BOOLEAN"
+    if isinstance(v, int):
+        return "BIGINT"
+    if isinstance(v, float):
+        return "DOUBLE"
+    if isinstance(v, str):
+        return "VARCHAR"
+    if isinstance(v, list):
+        return [merge_types([infer_type(x) for x in v])]
+    special = {"$oid": "VARCHAR", "$date": "TIMESTAMP", "$numberLong": "BIGINT", "$numberInt": "BIGINT",
+               "$numberDouble": "DOUBLE", "$numberDecimal": "DOUBLE"}
+    if v.keys() & special.keys():
+        return special[next(iter(v.keys() & special.keys()))]
+    if any(k.startswith("$") for k in v):  # binary, regex, timestamp, ... -> keep as text
+        return "VARCHAR"
+    return {k: infer_type(x) for k, x in v.items()}
+
+
+def merge_types(types):
+    types = [t for t in types if t is not None]
+    if not types:
+        return None
+    if all(isinstance(t, dict) for t in types):
+        keys = dict.fromkeys(k for t in types for k in t)  # keeps first-seen field order
+        return {k: merge_types([t.get(k) for t in types]) for k in keys}
+    if all(isinstance(t, list) for t in types):
+        return [merge_types([t[0] for t in types])]
+    kinds = set(map(str, types))
+    if len(kinds) == 1:
+        return types[0]
+    return "DOUBLE" if kinds == {"BIGINT", "DOUBLE"} else "VARCHAR"
+
+
+def render_type(t):
+    if t is None:
+        return "VARCHAR"
+    if isinstance(t, list):
+        return render_type(t[0]) + "[]"
+    if isinstance(t, dict):
+        return "STRUCT(" + ", ".join(f"{ident(k)} {render_type(x)}" for k, x in t.items()) + ")"
+    return t
 
 
 @statements
@@ -160,6 +237,11 @@ ENGINES, CATALOG, HEALTH = {}, {}, {}
 BUILD_LOCK = threading.Lock()
 RUNNING = {}
 FILE_WRITES = {duckdb.StatementType.COPY, duckdb.StatementType.COPY_DATABASE, duckdb.StatementType.EXPORT}
+# Extension functions that take their own connection string or run raw remote SQL would bypass the registered,
+# granted datasources (and DuckDB's external-access lock does not cover them); path listings would show DSNs.
+# Datasource views call these internally, so user SQL never needs them.
+# ponytail: name denylist on the SQL text (also hits comments/strings); an AST walk if that bites.
+BLOCKED_FUNCTIONS = re.compile(r"\b(mongo_\w+|postgres_\w+|mssql_\w+|mysql_\w+|sqlite_\w+|duckdb_databases|database_list)\b", re.I)
 
 
 def build(sources, strict=False):
@@ -379,6 +461,8 @@ def start(q, user):
         # allowed_directories also permits writes, so file-writing statements are refused outright.
         if {s.type for s in cur.extract_statements(q.sql)} & FILE_WRITES:
             raise duckdb.PermissionException("COPY / EXPORT are not allowed")
+        if m := BLOCKED_FUNCTIONS.search(q.sql):
+            raise duckdb.PermissionException(f"{m.group(1)} is not allowed; query registered datasources instead")
         cur.execute(q.sql)
     except duckdb.Error as e:
         finish(q, user, cur, timer, error=e)
