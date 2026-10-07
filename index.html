@@ -286,7 +286,18 @@ const host = (port) => [
 ];
 const FIELDS = {
   postgres: host(5432),
-  sqlserver: [...host(1433), { key: 'encrypt', label: 'Encrypt connection', kind: 'select', options: ['yes', 'no'] }],
+  sqlserver: [
+    { key: 'host', label: 'Host', placeholder: 'sqlhost.corp.example.com', required: true },
+    { key: 'port', label: 'Port', kind: 'number', value: 1433, required: true },
+    { key: 'database', label: 'Database', required: true },
+    { key: 'auth', label: 'Authentication', kind: 'select', options: ['windows', 'sql'],
+      hint: 'windows: integrated (Kerberos/NTLM) as the Windows account running the Ducktale server, for every user; leave username and password empty. sql: SQL Server login.' },
+    { key: 'user', label: 'Username (sql only)' },
+    { key: 'password', label: 'Password (sql only)', kind: 'password' },
+    { key: 'encrypt', label: 'Encrypt connection', kind: 'select', options: ['yes', 'no'] },
+    { key: 'trust_server_certificate', label: 'Trust server certificate (windows only)', kind: 'select', options: ['no', 'yes'],
+      hint: 'yes accepts a self-signed / internal-CA certificate without verification.' },
+  ],
   mongo: [
     { key: 'uri', label: 'Connection URI', kind: 'password', placeholder: 'mongodb://user:pass@host:27017/?authSource=admin', required: true,
       hint: 'Every database becomes a schema and every collection a table. The user is authenticated against ?authSource=…, else the database in the path (/shop), else admin.' },

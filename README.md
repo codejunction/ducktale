@@ -41,7 +41,7 @@ building the catalog then runs in the background (the catalog shows a spinner un
 | Type | Becomes | Notes |
 |---|---|---|
 | PostgreSQL | `name.schema.table` | Database `*` or `a, b` attaches several: `name_db.schema.table` |
-| SQL Server | `name.schema.table` | Community `mssql` extension; untested |
+| SQL Server | `name.schema.table` | [mssql](https://github.com/hugr-lab/mssql-extension) extension. Windows authentication (SSPI: Kerberos, NTLM fallback) runs as the account running Ducktale, for every user; or SQL login. Untested against a live server |
 | MongoDB | `name.database.collection` | See below |
 | Iceberg / IOMETE | `name.namespace.table` | REST catalog; several warehouses `a, b` become `name_a`, `name_b`; untested |
 | S3 / S3-compatible | `name.table` | Blank endpoint = AWS; any S3-compatible store via endpoint URL |

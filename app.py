@@ -124,11 +124,22 @@ def postgres(db, n, c, test=False):
 
 
 @statements
-def sqlserver(n, c):  # credentials go through a secret: a DSN in ATTACH would show up in duckdb_databases().path
-    return ["INSTALL mssql FROM community", "LOAD mssql",
-            secret(n, {"TYPE": "mssql", "HOST": c["host"], "PORT": c.get("port", 1433), "DATABASE": c["database"],
-                       "USER": c["user"], "PASSWORD": c["password"]}),
-            f"ATTACH '' AS {ident(n)} (TYPE mssql, SECRET {ident(n)}, READ_ONLY)"], []
+def sqlserver(n, c):
+    """auth "sql": user/password through a secret (a DSN in ATTACH would show in duckdb_databases().path).
+    auth "windows": integrated SSPI/Kerberos as the account running Ducktale, so the connection string holds no secret.
+    Extension docs: https://github.com/hugr-lab/mssql-extension/blob/main/Kerberos.md"""
+    stmts = ["INSTALL mssql FROM community", "LOAD mssql",
+             f"SET mssql_query_timeout = {int(TIMEOUT_S)}"]  # extension default 30s would cut federated queries short
+    encrypt = str(c.get("encrypt", "yes")).lower() in ("yes", "true")
+    if c.get("auth") == "windows":
+        dsn = (f"Server={c['host']},{c.get('port', 1433)};Database={c['database']};Trusted_Connection=yes;"
+               f"Encrypt={'yes' if encrypt else 'no'};TrustServerCertificate={c.get('trust_server_certificate', 'no')}")
+        return stmts + [f"ATTACH {lit(dsn)} AS {ident(n)} (TYPE mssql, READ_ONLY)"], []
+    if not c.get("user") or not c.get("password"):
+        raise ValueError("user and password are required for SQL Server authentication (or choose Windows)")
+    return stmts + [secret(n, {"TYPE": "mssql", "HOST": c["host"], "PORT": c.get("port", 1433), "DATABASE": c["database"],
+                               "USER": c["user"], "PASSWORD": c["password"], "USE_ENCRYPT": encrypt}),
+                    f"ATTACH '' AS {ident(n)} (TYPE mssql, SECRET {ident(n)}, READ_ONLY)"], []
 
 
 MONGO_SCHEMA_SAMPLE = 10_000  # random documents per collection; covers small collections completely
