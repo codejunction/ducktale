@@ -1,4 +1,5 @@
 """Self-contained check: auth, per-user access, federation, sandbox, export, encryption. Run: uv run python test_app.py"""
+import json
 import os
 import sqlite3
 import tempfile
@@ -60,6 +61,15 @@ for bad in [f"FROM read_csv('{os.path.abspath(__file__)}')", "SET enable_externa
     assert q(admin, bad).status_code == 400, bad
 
 assert q(admin, "SELECT 1 AS mongo_revenue, 2 AS postgres_rows").status_code == 200  # names alone are fine
+
+# Resource usage: measured per query, estimated by EXPLAIN, live system stats.
+use = q(admin, "SELECT count(*) FROM range(3000000)").json()["usage"]
+assert use["cpu_s"] >= 0 and use["wall_s"] > 0 and use["peak_mem_bytes"] >= 0, use
+ex = admin.post("/api/explain", json={"id": "x", "sql": "SELECT i % 10, count(*) FROM range(1000000) t(i) GROUP BY 1;"}).json()
+assert "HASH_GROUP_BY" in json.dumps(ex["plan"]) and ex["estimate"]["rows_scanned"] == 1_000_000 and ex["estimate"]["cpu_s"] > 0, ex
+assert admin.post("/api/explain", json={"id": "x", "sql": "FROM mongo_scan('mongodb://x', 'd', 'c')"}).status_code == 400
+sysinfo = admin.get("/api/system").json()
+assert 0 < sysinfo["ram_used_bytes"] <= sysinfo["ram_total_bytes"] and "gpu" in sysinfo, sysinfo
 
 # Per-user datasource access is enforced by what is attached, not by the UI.
 assert admin.post("/api/users", json={"email": "ana@x.io", "password": "analyst-pass", "datasources": ["crm"]}).status_code == 200

@@ -124,6 +124,30 @@
   .status-SUCCESS, .status-FAILED { font-size: 11px; font-weight: 600; border-radius: 10px; padding: 1px 8px; }
   .status-SUCCESS { color: #1e7e3c; background: #2fa84f22; } .status-FAILED { color: var(--danger); background: #c0352b1f; }
   header .spacer { flex: 1; } header .who { color: var(--muted); font-size: 13px; }
+  .sysbar { display: flex; gap: 14px; font: 12px ui-monospace, Consolas, monospace; color: var(--muted); }
+  .sysbar span { display: flex; align-items: center; gap: 6px; }
+  .meter { width: 46px; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .meter i { display: block; height: 100%; background: var(--accent); transition: width .4s; }
+  .meter i.hot { background: var(--danger); }
+  .usage { color: var(--muted); }
+  .estimate { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; color: var(--muted); }
+  .estimate b { color: var(--text); font-weight: 600; }
+  .dag { position: relative; overflow: auto; padding: 16px; }
+  .dag svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+  .dag path { fill: none; stroke: var(--muted); stroke-width: 1.5; opacity: .7; }
+  .dag marker path { fill: var(--muted); stroke: none; }
+  .node { position: absolute; box-sizing: border-box; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px;
+          background: var(--panel); font-size: 12px; overflow: hidden; box-shadow: 0 1px 3px #0002; }
+  .node .op { font: 600 12px ui-monospace, Consolas, monospace; display: flex; gap: 6px; align-items: center; }
+  .node .rows { color: var(--accent); font-weight: 600; margin: 2px 0 4px; }
+  .node .info { color: var(--muted); font-family: ui-monospace, Consolas, monospace; font-size: 11px;
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .node.remote { border-color: #3b82f6; } .node.remote .op::after { content: "remote"; }
+  .node.mem { border-style: dashed; }
+  .node .op::after { margin-left: auto; font: 10px system-ui; color: var(--muted); }
+  .node.mem .op::after { content: "holds in memory"; }
+  .dag-legend { display: flex; gap: 14px; padding: 6px 14px; font-size: 11px; color: var(--muted); }
+  @media (max-width: 1100px) { .sysbar { display: none; } }
   .dot.bad { background: var(--danger); }
   h2 { display: flex; align-items: center; } h2 .icon { margin-left: auto; font-size: 13px; }
   h2 .icon:hover { color: var(--text); }
@@ -154,7 +178,7 @@
 </style>
 </head>
 <body>
-<header><span class="logo" aria-hidden="true">🦆</span><b>Ducktale</b><small>Federated SQL on DuckDB</small><span class="spacer"></span><span class="who" id="who"></span><button id="openusers" hidden>Users</button><button id="logout">Sign out</button></header>
+<header><span class="logo" aria-hidden="true">🦆</span><b>Ducktale</b><small>Federated SQL on DuckDB</small><span class="spacer"></span><span class="sysbar" id="sysbar" aria-label="Server resource usage"></span><span class="who" id="who"></span><button id="openusers" hidden>Users</button><button id="logout">Sign out</button></header>
 <aside>
   <section>
     <h2>Datasources</h2>
@@ -632,12 +656,17 @@ async function run(explain = false) {
   current = crypto.randomUUID(); const t0 = performance.now();
   $('run').disabled = $('explain').disabled = true; $('cancel').disabled = false; $('status').textContent = explain ? 'Planning…' : 'Running…';
   try {
-    const sql = explain ? 'EXPLAIN ' + editor.getValue().trim().replace(/;$/, '') : editor.getValue();
-    const r = await api('/api/query', { method: 'POST', body: JSON.stringify({ id: current, sql }) });
+    const body = JSON.stringify({ id: current, sql: editor.getValue() });
     if (explain) {
-      $('result').replaceChildren(el('pre', r.rows.map(row => row[1]).join('\n'), 'plan'));
+      const r = await api('/api/explain', { method: 'POST', body });
+      const e = r.estimate, line = el('div', null, 'estimate');
+      line.append('Estimated (rough): ', el('b', `~${fmtNum(e.rows_scanned)} rows scanned`), ' · ',
+        el('b', `~${fmtBytes(e.peak_mem_bytes)} peak memory`), ' · ', el('b', `~${e.cpu_s}s CPU`),
+        e.unknown_scans ? ` · ${e.unknown_scans} source(s) report no size estimate` : '',
+        ' — remote sources are usually limited by the network, not CPU.');
+      $('result').replaceChildren(line, dagLegend(), renderDag(r.plan));
       $('status').textContent = 'Query plan';
-    } else showResult(r, t0);
+    } else showResult(await api('/api/query', { method: 'POST', body }), t0);
   } catch (err) { $('status').textContent = ''; $('result').replaceChildren(el('div', err.message, 'err')); }
   current = null; $('run').disabled = $('explain').disabled = false; $('cancel').disabled = true; loadHistory(0);
 }
@@ -651,7 +680,80 @@ function showResult(r, t0) {
       return tr;
     }));
     $('result').replaceChildren(r.columns.length ? table : el('div', 'Statement executed.', 'placeholder'));
-    $('status').textContent = `${r.rows.length.toLocaleString()}${r.truncated ? '+' : ''} rows · ${((performance.now() - t0) / 1000).toFixed(2)}s`;
+    const u = r.usage;
+    $('status').replaceChildren(`${r.rows.length.toLocaleString()}${r.truncated ? '+' : ''} rows · ${((performance.now() - t0) / 1000).toFixed(2)}s`,
+      el('span', ` · CPU ${u.cpu_s}s (≈${u.cpu_pct}% of all cores) · peak memory ${fmtBytes(u.peak_mem_bytes)}`, 'usage'));
+    $('status').title = 'CPU: server process CPU time during the query (overlaps if others run at the same time). Memory: peak DuckDB buffer memory, sampled every 100 ms.';
+}
+
+// Plan as a left-to-right DAG: sources on the left, the final result on the right. Leaves take one row each;
+// a parent sits at the average height of its children, one column to the right of its deepest child.
+const NODE_W = 230, NODE_H = 104, GAP_X = 56, GAP_Y = 18;
+const REMOTE_OP = /POSTGRES|MONGO|MSSQL|ICEBERG/, MEM_OP = /HASH_JOIN|GROUP_BY|ORDER_BY|WINDOW|TOP_N/;
+function renderDag(plan) {
+  const nodes = [], edges = []; let leaves = 0;
+  const walk = node => {
+    const kids = (node.children || []).map(walk);
+    const n = { node, kids, col: kids.length ? Math.max(...kids.map(k => k.col)) + 1 : 0,
+                row: kids.length ? kids.reduce((a, k) => a + k.row, 0) / kids.length : leaves++ };
+    kids.forEach(k => edges.push([k, n])); nodes.push(n); return n;
+  };
+  plan.forEach(walk);
+  const wrap = el('div', null, 'dag'), ns = 'http://www.w3.org/2000/svg', svg = document.createElementNS(ns, 'svg');
+  const pos = n => ({ x: 16 + n.col * (NODE_W + GAP_X), y: 16 + n.row * (NODE_H + GAP_Y) });
+  const width = 32 + (Math.max(...nodes.map(n => n.col)) + 1) * (NODE_W + GAP_X), height = 32 + Math.max(leaves, 1) * (NODE_H + GAP_Y);
+  svg.setAttribute('width', width); svg.setAttribute('height', height);
+  svg.innerHTML = '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>';
+  for (const [from, to] of edges) {
+    const a = pos(from), b = pos(to), x1 = a.x + NODE_W, y1 = a.y + NODE_H / 2, x2 = b.x, y2 = b.y + NODE_H / 2, mx = (x1 + x2) / 2;
+    const path = document.createElementNS(ns, 'path');
+    path.setAttribute('d', `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2 - 2},${y2}`); path.setAttribute('marker-end', 'url(#arrow)');
+    svg.append(path);
+  }
+  wrap.append(svg);
+  for (const n of nodes) {
+    const { name = '', extra_info: info = {} } = n.node, box = el('div', null, 'node'), p = pos(n);
+    if (REMOTE_OP.test(name)) box.classList.add('remote');
+    if (MEM_OP.test(name)) box.classList.add('mem');
+    Object.assign(box.style, { left: `${p.x}px`, top: `${p.y}px`, width: `${NODE_W}px`, height: `${NODE_H}px` });
+    const est = String(info['Estimated Cardinality'] ?? '').replace(/\D/g, '');
+    box.append(el('div', name, 'op'), el('div', est && +est > 1 ? `~${fmtNum(+est)} rows` : 'rows: no estimate', 'rows'));
+    const details = Object.entries(info).filter(([k]) => k !== 'Estimated Cardinality')
+      .map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : v}`);
+    details.slice(0, 3).forEach(d => box.append(el('div', d, 'info')));
+    box.title = `${name}\n${details.join('\n')}`;
+    wrap.append(box);
+  }
+  wrap.style.height = `${Math.min(height, 560)}px`;
+  return wrap;
+}
+function dagLegend() {
+  const l = el('div', null, 'dag-legend');
+  l.append('Data flows left → right. ', el('span', 'Blue border: remote source'), el('span', 'Dashed: holds rows in memory'), el('span', 'Hover a box for all details'));
+  return l;
+}
+
+const fmtBytes = b => b < 1024 ** 2 ? `${Math.round(b / 1024)} KB` : b < 1024 ** 3 ? `${(b / 1024 ** 2).toFixed(1)} MB` : `${(b / 1024 ** 3).toFixed(2)} GB`;
+const fmtNum = n => n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}K` : String(n);
+function meter(label, pct, text) {
+  const s = el('span'), m = el('span', null, 'meter'), i = el('i');
+  i.style.width = `${Math.min(100, pct)}%`; if (pct > 85) i.className = 'hot';
+  m.append(i); s.append(label, m, text); s.title = `${label} ${text}`; return s;
+}
+// Server "task manager": refreshed every 2 s while the tab is visible and someone is signed in.
+async function loadSystem() {
+  if (me && !document.hidden) {
+    try {
+      const x = await api('/api/system'), gb = b => (b / 1024 ** 3).toFixed(1);
+      const items = [meter('CPU', x.cpu_pct, `${Math.round(x.cpu_pct)}%`),
+        meter('RAM', 100 * x.ram_used_bytes / x.ram_total_bytes, `${gb(x.ram_used_bytes)}/${gb(x.ram_total_bytes)} GB`)];
+      for (const g of x.gpu || []) items.push(meter('GPU', +g.util_pct, `${g.util_pct}% · ${(g.mem_used_mb / 1024).toFixed(1)}/${(g.mem_total_mb / 1024).toFixed(1)} GB`));
+      if (!x.gpu) items.push(el('span', 'GPU n/a'));
+      items.push(el('span', `DuckDB ${fmtBytes(x.duckdb_mem_bytes)}`));
+      $('sysbar').replaceChildren(...items);
+    } catch { /* signed out or server restarting: keep the last reading */ }
+  }
+  setTimeout(loadSystem, 2000);
 }
 $('run').onclick = () => run();
 $('explain').onclick = () => run(true);
@@ -682,6 +784,7 @@ editor.on('inputRead', (cm, change) => {
 });
 $('format').onclick = formatSql;
 refresh().catch(() => {});
+loadSystem();
 </script>
 </body>
 </html>

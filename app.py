@@ -8,7 +8,9 @@ import logging
 import os
 import re
 import secrets
+import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 from contextlib import closing
@@ -16,6 +18,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 import duckdb
+import psutil
 from cryptography.fernet import Fernet
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Response
 from fastapi.responses import FileResponse, StreamingResponse
@@ -640,16 +643,139 @@ def finish(q, user, cur, timer, rows=None, error=None):
         raise HTTPException(400, f"{type(error).__name__}: {error}")
 
 
+# --- Resource usage. DuckDB's per-query profiler can't be enabled once configuration is locked (and the lock is a
+# security boundary), so usage is measured from outside: process CPU time across the query, and DuckDB buffer memory
+# sampled every 100 ms. ponytail: concurrent queries share the process, so their CPU overlaps; per-query profiling
+# would need per-cursor settings DuckDB doesn't allow under lock_configuration.
+MEM_SQL = "SELECT coalesce(sum(memory_usage_bytes), 0) FROM duckdb_memory()"
+
+
+class Usage:
+    def __init__(self, db):
+        self.db, self.stop_flag, self.proc = db, threading.Event(), psutil.Process()
+        self.base = self.peak = self.memory()
+        self.cpu0, self.t0 = sum(self.proc.cpu_times()[:2]), time.monotonic()
+        self.thread = threading.Thread(target=self.sample, daemon=True)
+        self.thread.start()
+
+    def memory(self):
+        try:
+            return self.db.cursor().execute(MEM_SQL).fetchone()[0]
+        except duckdb.Error:
+            return 0
+
+    def sample(self):
+        while not self.stop_flag.wait(0.1):
+            self.peak = max(self.peak, self.memory())
+
+    def stop(self):
+        self.stop_flag.set()
+        self.thread.join()
+        self.peak = max(self.peak, self.memory())
+        wall, cpu = time.monotonic() - self.t0, sum(self.proc.cpu_times()[:2]) - self.cpu0
+        return {"wall_s": round(wall, 3), "cpu_s": round(cpu, 3),
+                "cpu_pct": round(100 * cpu / max(wall, 1e-6) / (psutil.cpu_count() or 1), 1),
+                "peak_mem_bytes": max(0, self.peak - self.base)}
+
+
+# EXPLAIN estimate: DuckDB's estimated cardinalities -> rough rows scanned, peak memory (rows held by blocking
+# operators) and CPU. ponytail: constants are rough, measured on this repo's demo data; remote sources are usually
+# bound by network, not CPU, and some scans report no estimate at all.
+EST_BYTES_PER_ROW = 64
+EST_ROWS_PER_CPU_SECOND = 40_000_000  # DuckDB-native work (joins, aggregates, local files)
+EST_REMOTE_ROWS_PER_CPU_SECOND = 400_000  # rows decoded from a remote driver (Postgres/Mongo/SQL Server/Iceberg)
+REMOTE_SCAN = re.compile(r"POSTGRES|MONGO|MSSQL|ICEBERG")
+
+
+def estimate(plan):
+    est = {"rows_scanned": 0, "rows_processed": 0, "remote_rows": 0, "mem_rows": 0, "unknown_scans": 0}
+
+    def card(node):
+        return int(re.sub(r"\D", "", str(node.get("extra_info", {}).get("Estimated Cardinality", ""))) or 0)
+
+    def walk(node):
+        kids, n, name = node.get("children", []), card(node), node.get("name", "")
+        if not kids:
+            if n <= 1:  # no estimate (the Mongo scan always reports 1)
+                n = 0
+                est["unknown_scans"] += 1
+            est["rows_scanned"] += n
+            if REMOTE_SCAN.search(name):
+                est["remote_rows"] += n
+                n = 0  # costed separately below
+        est["rows_processed"] += n
+        if name == "HASH_JOIN" and len(kids) > 1:
+            est["mem_rows"] += card(kids[1])  # build side is held in memory
+        elif "GROUP_BY" in name or name == "TOP_N":
+            est["mem_rows"] += n
+        elif name in ("ORDER_BY", "WINDOW") and kids:
+            est["mem_rows"] += card(kids[0])
+        for k in kids:
+            walk(k)
+
+    for root in plan:
+        walk(root)
+    return {"rows_scanned": est["rows_scanned"], "peak_mem_bytes": est["mem_rows"] * EST_BYTES_PER_ROW,
+            "cpu_s": round(est["rows_processed"] / EST_ROWS_PER_CPU_SECOND
+                           + est["remote_rows"] / EST_REMOTE_ROWS_PER_CPU_SECOND, 2),
+            "unknown_scans": est["unknown_scans"]}
+
+
 @app.post("/api/query")
 def run_query(q: Query, user=Depends(current_user)):
+    usage = Usage(engine(user)[1])
     cur, timer = start(q, user)
     try:
         cols = [d[0] for d in cur.description or []]
         rows = cur.fetchmany(q.limit) if cols else []
     except duckdb.Error as e:
+        usage.stop()
         finish(q, user, cur, timer, error=e)
     finish(q, user, cur, timer, rows=len(rows))
-    return {"columns": cols, "rows": rows, "truncated": len(rows) == q.limit}
+    return {"columns": cols, "rows": rows, "truncated": len(rows) == q.limit, "usage": usage.stop()}
+
+
+@app.post("/api/explain")
+def explain(q: Query, user=Depends(current_user)):
+    """DuckDB's plan tree (JSON, drawn as a DAG by the UI) plus a rough resource estimate."""
+    sql = q.sql.strip().rstrip(";")
+    cur, timer = start(Query(id=q.id, sql="EXPLAIN (FORMAT json) " + sql), user)  # same guards and history
+    try:
+        plan = json.loads(cur.fetchall()[0][1])
+    except (duckdb.Error, ValueError, IndexError) as e:
+        finish(q, user, cur, timer, error=e)
+    finish(q, user, cur, timer, rows=1)
+    return {"plan": plan, "estimate": estimate(plan)}
+
+
+GPU_CACHE = {"at": 0.0, "value": None}
+
+
+def gpu_stats():
+    """NVIDIA GPUs via nvidia-smi (cached 2 s); None when there is none. DuckDB itself does not use the GPU."""
+    if time.monotonic() - GPU_CACHE["at"] > 2 and shutil.which("nvidia-smi"):
+        try:
+            out = subprocess.run(["nvidia-smi", "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                                  "--format=csv,noheader,nounits"], capture_output=True, text=True, timeout=2).stdout
+            GPU_CACHE["value"] = [dict(zip(("name", "util_pct", "mem_used_mb", "mem_total_mb"),
+                                           [x.strip() for x in line.split(",")])) for line in out.strip().splitlines()]
+        except (OSError, subprocess.TimeoutExpired):
+            GPU_CACHE["value"] = None
+        GPU_CACHE["at"] = time.monotonic()
+    return GPU_CACHE["value"]
+
+
+@app.get("/api/system")
+def system(_=Depends(current_user)):
+    vm = psutil.virtual_memory()
+    duck = 0
+    for db in list(ENGINES.values()):
+        try:
+            duck += db.cursor().execute(MEM_SQL).fetchone()[0]
+        except duckdb.Error:
+            pass
+    return {"cpu_pct": psutil.cpu_percent(None), "ram_used_bytes": vm.total - vm.available, "ram_total_bytes": vm.total,
+            "gpu": gpu_stats(), "duckdb_mem_bytes": duck}
 
 
 @app.post("/api/export")
