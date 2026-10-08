@@ -330,9 +330,31 @@ BLOCKED_FUNCTIONS = re.compile(
     r"|\b(database_list)\b", re.I | re.S)
 
 
+# gpudb (https://duckdb.org/community_extensions/extensions/gpudb): GPU group-by/join/filter/top-k on Apple Silicon
+# Metal or Linux CUDA. Loaded when the platform has a build, exposing its explicit gpu_* functions. Plain SQL is only
+# rewritten for the GPU by gpudb's own Python wrapper (gpudb.connect), which Ducktale does not use.
+# No Windows build exists. DUCKTALE_GPUDB=0 turns the attempt off.
+GPUDB = {"tried": False, "info": None, "error": None}
+
+
+def load_gpudb(db):
+    if os.environ.get("DUCKTALE_GPUDB", "1") == "0" or (GPUDB["tried"] and not GPUDB["info"]):
+        return
+    try:
+        if not GPUDB["tried"]:
+            db.execute("INSTALL gpudb FROM community")
+        db.execute("LOAD gpudb")
+        GPUDB["info"] = str(db.execute("SELECT gpu_build_info()").fetchone()[0])
+    except duckdb.Error as e:
+        GPUDB["error"] = str(e).splitlines()[0][:200]
+        log.info("gpudb not loaded: %s", GPUDB["error"])
+    GPUDB["tried"] = True
+
+
 def build(sources, strict=False, test=False):
     db = duckdb.connect(config={"memory_limit": MEMORY_LIMIT})
     db.execute("SET enable_progress_bar = false")  # remote scans can't report progress: it only ever printed 0%
+    load_gpudb(db)
     allowed = []
     for name, typ, config in sources:
         try:
@@ -775,7 +797,8 @@ def system(_=Depends(current_user)):
         except duckdb.Error:
             pass
     return {"cpu_pct": psutil.cpu_percent(None), "ram_used_bytes": vm.total - vm.available, "ram_total_bytes": vm.total,
-            "gpu": gpu_stats(), "duckdb_mem_bytes": duck}
+            "gpu": gpu_stats(), "duckdb_mem_bytes": duck,
+            "gpu_accel": {"loaded": bool(GPUDB["info"]), "info": GPUDB["info"], "error": GPUDB["error"]}}
 
 
 @app.post("/api/export")
