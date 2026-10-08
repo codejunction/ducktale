@@ -319,8 +319,12 @@ FILE_WRITES = {duckdb.StatementType.COPY, duckdb.StatementType.COPY_DATABASE, du
 # Extension functions that take their own connection string or run raw remote SQL would bypass the registered,
 # granted datasources (and DuckDB's external-access lock does not cover them); path listings would show DSNs.
 # Datasource views call these internally, so user SQL never needs them.
-# ponytail: name denylist on the SQL text (also hits comments/strings); an AST walk if that bites.
-BLOCKED_FUNCTIONS = re.compile(r"\b(mongo_\w+|postgres_\w+|mssql_\w+|mysql_\w+|sqlite_\w+|duckdb_databases|database_list)\b", re.I)
+# Matches calls only - name, optional quote, then "(" possibly after whitespace/comments - so a column alias like
+# mongo_revenue is fine. PRAGMA database_list takes no parentheses, so it is matched as a word.
+# ponytail: regex over the SQL text (a call inside a string literal is refused too); an AST walk if that bites.
+BLOCKED_FUNCTIONS = re.compile(
+    r"\b(mongo_\w+|postgres_\w+|mssql_\w+|mysql_\w+|sqlite_\w+|duckdb_databases)\"?(?:\s|/\*.*?\*/|--[^\n]*\n)*\("
+    r"|\b(database_list)\b", re.I | re.S)
 
 
 def build(sources, strict=False, test=False):
@@ -619,7 +623,7 @@ def start(q, user):
         if {s.type for s in cur.extract_statements(q.sql)} & FILE_WRITES:
             raise duckdb.PermissionException("COPY / EXPORT are not allowed")
         if m := BLOCKED_FUNCTIONS.search(q.sql):
-            raise duckdb.PermissionException(f"{m.group(1)} is not allowed; query registered datasources instead")
+            raise duckdb.PermissionException(f"{m.group(1) or m.group(2)} is not allowed; query registered datasources instead")
         cur.execute(q.sql)
     except duckdb.Error as e:
         finish(q, user, cur, timer, error=e)

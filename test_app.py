@@ -55,8 +55,11 @@ assert r.json()["rows"] == [["Ann", 99.5]], r.text
 for bad in [f"FROM read_csv('{os.path.abspath(__file__)}')", "SET enable_external_access=true",
             "INSTALL mysql", f"ATTACH '{tmp}/x.db' AS x", f"COPY (SELECT 1) TO '{tmp}/crm/out.csv'",
             "FROM mongo_scan('mongodb://elsewhere', 'db', 'c')", "FROM postgres_scan('host=elsewhere', 'public', 't')",
-            'FROM "Postgres_Query"(\'crm\', \'select 1\')', "SELECT path FROM duckdb_databases()"]:
+            'FROM "Postgres_Query"(\'crm\', \'select 1\')', "SELECT path FROM duckdb_databases()",
+            "FROM mongo_scan /* sneaky */ ('mongodb://elsewhere', 'db', 'c')", "PRAGMA database_list"]:
     assert q(admin, bad).status_code == 400, bad
+
+assert q(admin, "SELECT 1 AS mongo_revenue, 2 AS postgres_rows").status_code == 200  # names alone are fine
 
 # Per-user datasource access is enforced by what is attached, not by the UI.
 assert admin.post("/api/users", json={"email": "ana@x.io", "password": "analyst-pass", "datasources": ["crm"]}).status_code == 200
