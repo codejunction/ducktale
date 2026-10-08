@@ -750,9 +750,6 @@ async function loadSystem() {
       for (const g of x.gpu || []) items.push(meter('GPU', +g.util_pct, `${g.util_pct}% · ${(g.mem_used_mb / 1024).toFixed(1)}/${(g.mem_total_mb / 1024).toFixed(1)} GB`));
       if (!x.gpu) items.push(el('span', 'GPU n/a'));
       items.push(el('span', `DuckDB ${fmtBytes(x.duckdb_mem_bytes)}`));
-      const accel = el('span', x.gpu_accel.loaded ? 'GPU accel on' : 'GPU accel off');
-      accel.title = x.gpu_accel.loaded ? `gpudb: ${x.gpu_accel.info}. Call gpu_* functions explicitly.` : `gpudb not loaded: ${x.gpu_accel.error || 'disabled (DUCKTALE_GPUDB=0)'}`;
-      items.push(accel);
       $('sysbar').replaceChildren(...items);
     } catch { /* signed out or server restarting: keep the last reading */ }
   }

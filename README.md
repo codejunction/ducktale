@@ -32,7 +32,6 @@ Check: `uv run python test_app.py`
 | `DUCKTALE_SECRET_KEY` | generated into `ducktale.db.key` | Fernet key that encrypts datasource credentials |
 | `DUCKTALE_MEMORY` | `2GB` | DuckDB memory limit per engine |
 | `DUCKTALE_TIMEOUT` | `300` | Query timeout in seconds |
-| `DUCKTALE_GPUDB` | `1` | Try loading the [gpudb](https://duckdb.org/community_extensions/extensions/gpudb) GPU extension (macOS Metal / Linux CUDA only; exposes its explicit `gpu_*` functions) |
 
 ## Datasources
 
@@ -73,7 +72,7 @@ Uses the [duckdb-mongo](https://github.com/stephaniewang526/duckdb-mongo) commun
 
 ## Monitoring
 
-The header shows server CPU, RAM, NVIDIA GPU/VRAM (via `nvidia-smi`), DuckDB memory and whether gpudb loaded.
+The header shows server CPU, RAM, NVIDIA GPU/VRAM (via `nvidia-smi`), and DuckDB memory.
 Each query reports its CPU time and peak DuckDB memory; **Explain** draws DuckDB's plan as a left-to-right DAG with a
 rough estimate of rows scanned, peak memory and CPU. CPU is measured for the whole server process, so it overlaps
 when several queries run at once; estimates come from DuckDB's cardinality guesses and are rough.
